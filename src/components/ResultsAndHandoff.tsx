@@ -28,12 +28,6 @@ import {
   ClinicianReplyPayload,
   createEncryptedHandoffPackage,
 } from '@/lib/handoff/protocol';
-import {
-  ZkEligibilityProof,
-  ZkVerificationResult,
-  generateEligibilityZkProof,
-  verifyEligibilityZkProof,
-} from '@/lib/zk/eligibility';
 import { CLINIC_DIRECTORY } from '@/data/clinics';
 import CrisisSafetyBanner from './CrisisSafetyBanner';
 import {
@@ -41,7 +35,6 @@ import {
   QrCode,
   CheckCircle2,
   AlertTriangle,
-  Sparkles,
   Trash2,
   Copy,
   Check,
@@ -53,8 +46,6 @@ import {
   Users,
   HeartHandshake,
   PhoneCall,
-  ChevronDown,
-  ChevronUp,
   RefreshCw,
   ExternalLink,
   CalendarCheck,
@@ -171,7 +162,6 @@ export default function ResultsAndHandoff({
 }: ResultsAndHandoffProps) {
   const [activePathway, setActivePathway] = useState<SupportTier>(result.tier);
 
-  // Independent Optional Deepening Module Drawer State
   const [openModule, setOpenModule] = useState<'who5' | 'gad7' | 'phq9' | null>(null);
   const [who5Draft, setWho5Draft] = useState<number[]>([
     who5.q1_cheerful,
@@ -213,7 +203,7 @@ export default function ResultsAndHandoff({
 
   const [credential, setCredential] = useState<GeneratedHandoffCredential | null>(null);
   const [isGeneratingHandoff, setIsGeneratingHandoff] = useState(false);
-  const [handoffError, setHandoffError] = useState<string | null>(null);
+  const [handoffSyncNotice, setHandoffSyncNotice] = useState<string | null>(null);
   const [revoked, setRevoked] = useState(false);
   const [copiedPin, setCopiedPin] = useState(false);
 
@@ -224,12 +214,6 @@ export default function ResultsAndHandoff({
   const [referralStatus, setReferralStatus] = useState<string>('GENERATED');
   const [checkingReply, setCheckingReply] = useState(false);
   const [reservedCircle, setReservedCircle] = useState(false);
-
-  const [showJudgeDrawer, setShowJudgeDrawer] = useState(false);
-  const [zkProof, setZkProof] = useState<ZkEligibilityProof | null>(null);
-  const [zkVerification, setZkVerification] = useState<ZkVerificationResult | null>(null);
-  const [isGeneratingZk, setIsGeneratingZk] = useState(false);
-  const [zkError, setZkError] = useState<string | null>(null);
 
   const pathwaySectionRef = React.useRef<HTMLDivElement>(null);
 
@@ -242,11 +226,11 @@ export default function ResultsAndHandoff({
 
     const nextWho5: Who5Responses = nextCompleted.who5
       ? {
-          q1_cheerful: who5Draft[0],
-          q2_calm: who5Draft[1],
-          q3_active: who5Draft[2],
-          q4_rested: who5Draft[3],
-          q5_interested: who5Draft[4],
+          q1_cheerful: who5Draft[0] ?? 3,
+          q2_calm: who5Draft[1] ?? 3,
+          q3_active: who5Draft[2] ?? 3,
+          q4_rested: who5Draft[3] ?? 3,
+          q5_interested: who5Draft[4] ?? 3,
         }
       : who5;
 
@@ -315,7 +299,7 @@ export default function ResultsAndHandoff({
 
   const handleGenerateHandoff = async () => {
     setIsGeneratingHandoff(true);
-    setHandoffError(null);
+    setHandoffSyncNotice(null);
     setRevoked(false);
     setClinicianReply(null);
     setKeySharedInPortal(false);
@@ -362,30 +346,46 @@ export default function ResultsAndHandoff({
         ...(residentNote.trim() ? { residentNote: residentNote.trim() } : {}),
       };
 
+      // 1. Encrypt client-side first and immediately render the 6-digit PIN + Key so mobile browsers never lose it
       const { credential: generated, serverPayload } = await createEncryptedHandoffPackage(summary);
-
-      const res = await fetch('/api/handoff', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'create',
-          ...serverPayload,
-          selectedClinicId: selectedClinic.id,
-          selectedClinicName: selectedClinic.name,
-          consultationMode,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Unable to create booking pass right now.');
-      }
-
       setCredential(generated);
       setReferralStatus('GENERATED');
       onHandoffCreated?.(generated.pin, generated.keyBase64Url);
-    } catch (err) {
-      setHandoffError(err instanceof Error ? err.message : 'Unable to create booking pass.');
+
+      // 2. Transmit encrypted blob to /api/handoff with mobile-safe retry
+      const postBody = JSON.stringify({
+        action: 'create',
+        ...serverPayload,
+        selectedClinicId: selectedClinic.id,
+        selectedClinicName: selectedClinic.name,
+        consultationMode,
+      });
+
+      const sendToServer = async () => {
+        const res = await fetch('/api/handoff', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          keepalive: true,
+          body: postBody,
+        });
+        if (!res.ok) {
+          throw new Error('Server sync pending');
+        }
+      };
+
+      try {
+        await sendToServer();
+      } catch {
+        // Automatic single retry for mobile Safari transient network hiccups
+        try {
+          await new Promise((r) => setTimeout(r, 600));
+          await sendToServer();
+        } catch {
+          setHandoffSyncNotice(
+            'Your booking code and private key are saved above. If your connection paused, tap "Check Clinic Reply" in a moment to confirm sync.'
+          );
+        }
+      }
     } finally {
       setIsGeneratingHandoff(false);
     }
@@ -398,6 +398,7 @@ export default function ResultsAndHandoff({
       const res = await fetch('/api/handoff', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
         body: JSON.stringify({
           action: 'release_key',
           pin: credential.pin,
@@ -415,6 +416,7 @@ export default function ResultsAndHandoff({
   const handleCheckClinicianReply = async () => {
     if (!credential) return;
     setCheckingReply(true);
+    setHandoffSyncNotice(null);
     try {
       const res = await fetch('/api/handoff', {
         method: 'POST',
@@ -438,41 +440,24 @@ export default function ResultsAndHandoff({
 
   const handleRevokeHandoff = async () => {
     if (!credential) return;
-    await fetch('/api/handoff', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'revoke', pin: credential.pin }),
-    });
+    try {
+      await fetch('/api/handoff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'revoke', pin: credential.pin }),
+      });
+    } catch {
+      // Clear local credential regardless
+    }
     setRevoked(true);
     setCredential(null);
     setClinicianReply(null);
     setKeySharedInPortal(false);
   };
 
-  const handleGenerateZkProof = async () => {
-    setIsGeneratingZk(true);
-    setZkError(null);
-    setZkVerification(null);
-
-    try {
-      const proof = await generateEligibilityZkProof(who5, 50);
-      setZkProof(proof);
-      const verified = await verifyEligibilityZkProof(proof);
-      setZkVerification(verified);
-    } catch (err) {
-      setZkError(
-        err instanceof Error
-          ? err.message
-          : 'Your wellbeing score is above 50, so a subsidized threshold proof (≤ 50) is not needed.'
-      );
-    } finally {
-      setIsGeneratingZk(false);
-    }
-  };
-
   const copyPinAndKey = () => {
     if (!credential) return;
-    navigator.clipboard.writeText(`PIN: ${credential.pin} | KEY: ${credential.keyBase64Url}`);
+    navigator.clipboard?.writeText(`PIN: ${credential.pin} | KEY: ${credential.keyBase64Url}`);
     setCopiedPin(true);
     setTimeout(() => setCopiedPin(false), 2500);
   };
@@ -489,7 +474,7 @@ export default function ResultsAndHandoff({
       ? 'Speaking with a doctor or counselor could offer real relief right now.'
       : result.tier === 2
       ? 'A supportive peer circle or guided recovery routine fits well right now.'
-      : 'Your reflection shows steady ground—gentle daily habits can help keep it that way.';
+      : 'Your reflection shows steady ground, gentle daily habits can help keep it that way.';
 
   return (
     <div className="max-w-4xl mx-auto space-y-8">
@@ -588,7 +573,7 @@ export default function ResultsAndHandoff({
           </button>
         </div>
 
-        {/* Independent Optional Module Drawer (Re-Interprets Live with Initial 3 Questions) */}
+        {/* Independent Optional Module Drawer */}
         {openModule && (
           <div className="p-5 sm:p-6 rounded-2xl bg-stone-50 border border-teal-200 mb-6 space-y-4">
             <div className="flex items-center justify-between gap-2">
@@ -1166,10 +1151,15 @@ export default function ResultsAndHandoff({
                     Your previous booking pass has been withdrawn and deleted.
                   </p>
                 )}
-                {handoffError && <p className="text-xs text-rose-600 mt-2">{handoffError}</p>}
               </div>
             ) : (
               <div className="space-y-5">
+                {handoffSyncNotice && (
+                  <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-950">
+                    {handoffSyncNotice}
+                  </div>
+                )}
+
                 <div className="p-6 rounded-3xl bg-stone-900 text-white flex flex-col md:flex-row items-center justify-between gap-6">
                   <div className="space-y-3 flex-1">
                     <div className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400">
@@ -1325,72 +1315,6 @@ export default function ResultsAndHandoff({
                         )}
                     </div>
                   )}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* 3. Technical Verification Drawer */}
-      <div className="bg-[#FFFEFB] border border-stone-200 rounded-2xl px-6 py-4">
-        <button
-          type="button"
-          onClick={() => setShowJudgeDrawer((prev) => !prev)}
-          className="flex items-center justify-between w-full text-xs font-medium text-stone-500 hover:text-stone-800 cursor-pointer"
-        >
-          <span className="inline-flex items-center gap-2">
-            <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-            Under the Hood: Zero-Knowledge Eligibility Proof &amp; Cryptographic Audit
-          </span>
-          {showJudgeDrawer ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-        </button>
-
-        {showJudgeDrawer && (
-          <div className="mt-4 pt-4 border-t border-stone-100 space-y-4">
-            <p className="text-xs text-stone-600 leading-relaxed">
-              Separate from AES-GCM encryption, Mizan Care includes a genuine{' '}
-              <strong>Poseidon Fiat-Shamir Zero-Knowledge Proof</strong> (`circomlibjs`). It
-              allows a resident to prove they qualify for subsidized community support (WHO-5 ≤
-              50) without disclosing their five underlying answers or exact total score.
-            </p>
-
-            <button
-              type="button"
-              disabled={isGeneratingZk}
-              onClick={handleGenerateZkProof}
-              className="px-4 py-2 rounded-xl bg-indigo-700 hover:bg-indigo-800 disabled:opacity-50 text-white font-semibold text-xs transition cursor-pointer"
-            >
-              {isGeneratingZk
-                ? 'Computing Poseidon Field Commitments...'
-                : 'Generate & Verify Zero-Knowledge Eligibility Proof'}
-            </button>
-
-            {zkError && (
-              <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 text-xs text-stone-700">
-                <strong>Note:</strong> {zkError} (To test this proof, complete a check-in with
-                WHO-5 ≤ 50).
-              </div>
-            )}
-
-            {zkProof && zkVerification && (
-              <div className="p-4 rounded-xl bg-indigo-50/60 border border-indigo-200 space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-indigo-950">
-                  <span>
-                    Verification Result:{' '}
-                    <span className="text-emerald-700">
-                      {zkVerification.valid ? 'VERIFIED VALID ✓' : 'INVALID'}
-                    </span>
-                  </span>
-                  <span className="font-mono text-[11px] text-indigo-700">
-                    {zkProof.protocol}
-                  </span>
-                </div>
-                <p className="text-xs text-stone-700">{zkVerification.reason}</p>
-                <div className="bg-stone-900 text-stone-200 p-3 rounded-lg font-mono text-[11px] overflow-x-auto space-y-1">
-                  <div>Public Commitment (Poseidon): {zkProof.publicInputs.publicCommitment}</div>
-                  <div>Fiat-Shamir Challenge Hash: {zkProof.proof.challengeHash}</div>
-                  <div>Disclosed Raw Item Scores: NONE (0 of 5 items revealed)</div>
                 </div>
               </div>
             )}

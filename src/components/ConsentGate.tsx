@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Lock, HeartHandshake, Sparkles, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Lock, HeartHandshake, Sparkles, Trash2 } from 'lucide-react';
 
 export interface ConsentPreferences {
   localDeviceStorage: boolean;
@@ -25,7 +25,6 @@ export default function ConsentGate({
     physicalContextIncluded: true,
     anonymousTelemetry: false,
   });
-  const [showTechDetails, setShowTechDetails] = useState(false);
 
   const togglePref = (key: keyof ConsentPreferences) => {
     setPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -55,7 +54,7 @@ export default function ConsentGate({
           </h1>
           <p className="text-stone-600 text-sm sm:text-base mt-2.5 leading-relaxed">
             No account, email, or phone number required. Take a gentle minute to reflect on how
-            you have been feeling—and decide for yourself what happens next.
+            you have been feeling, and decide for yourself what happens next.
           </p>
         </div>
 
@@ -95,8 +94,8 @@ export default function ConsentGate({
                 Notice how my body has been feeling too
               </div>
               <p className="text-xs text-stone-600 mt-1 leading-relaxed">
-                Includes three gentle questions on sleep, muscle tension, and daily energy—because
-                stress often shows up in the body first.
+                Includes gentle questions on sleep, appetite, and daily energy because stress often
+                shows up in the body first.
               </p>
             </div>
             <button
@@ -169,30 +168,6 @@ export default function ConsentGate({
           >
             Begin Quiet Check-In
           </button>
-        </div>
-
-        {/* Collapsible Technical Drawer for Judges */}
-        <div className="mt-6 pt-4 border-t border-stone-100">
-          <button
-            type="button"
-            onClick={() => setShowTechDetails((prev) => !prev)}
-            className="flex items-center justify-between w-full text-xs text-stone-400 hover:text-stone-600"
-          >
-            <span>Under the Hood: Encryption & Privacy Architecture (For Technical Reviewers)</span>
-            {showTechDetails ? (
-              <ChevronUp className="w-3.5 h-3.5" />
-            ) : (
-              <ChevronDown className="w-3.5 h-3.5" />
-            )}
-          </button>
-          {showTechDetails && (
-            <p className="mt-2.5 text-xs text-stone-500 bg-stone-50 p-3.5 rounded-xl border border-stone-200 leading-relaxed">
-              Local records are encrypted inside browser IndexedDB using Web Crypto API
-              (AES-256-GCM) with a non-extractable device key. After completing the check-in,
-              residents can generate a 256-bit end-to-end encrypted clinician referral pass or a
-              Poseidon Fiat-Shamir Zero-Knowledge eligibility proof without disclosing raw answers.
-            </p>
-          )}
         </div>
       </div>
     </div>
