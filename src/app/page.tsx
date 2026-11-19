@@ -30,6 +30,7 @@ import {
   buildInstantAnchorDataset,
   buildMildDriftDataset,
   buildSampleDriftDataset,
+  dispatchSystemWellbeingNotification,
 } from '@/lib/sensing/adlDetector';
 import {
   Shield,
@@ -51,6 +52,7 @@ import {
   Activity,
   HeartPulse,
   ArrowRight,
+  BellRing,
 } from 'lucide-react';
 
 type ActivePortal = 'resident' | 'booking_status' | 'support' | 'clinician' | 'monitor';
@@ -73,6 +75,12 @@ export default function MizanCareApp() {
   const [adlReport, setAdlReport] = useState<AdlDriftReport>(() =>
     evaluateMindBodyAdlDrift(buildInstantAnchorDataset())
   );
+
+  const [toastAlert, setToastAlert] = useState<{
+    title: string;
+    body: string;
+    severity: 'mild' | 'high';
+  } | null>(null);
 
   const [latestAssessment, setLatestAssessment] = useState<{
     who5: Who5Responses;
@@ -173,21 +181,8 @@ export default function MizanCareApp() {
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, []);
 
-  const applyHomeScenario = (scenario: 'steady' | 'mild' | 'high') => {
-    const nextDataset =
-      scenario === 'high'
-        ? buildSampleDriftDataset()
-        : scenario === 'mild'
-        ? buildMildDriftDataset()
-        : buildInstantAnchorDataset();
-    saveAdlHistory(nextDataset);
-    setAdlReport(evaluateMindBodyAdlDrift(nextDataset));
-  };
-
-  /**
-   * Direct Automated Escalation to Physical Consultation when High 3-Day Drift occurs
-   */
   const handleDirectClinicalConsultation = () => {
+    setToastAlert(null);
     const who5: Who5Responses = {
       q1_cheerful: 2,
       q2_calm: 2,
@@ -210,6 +205,41 @@ export default function MizanCareApp() {
     );
     setLatestAssessment({ who5, physicalContext, result });
     setResidentStage('results');
+  };
+
+  const applyHomeScenario = async (scenario: 'steady' | 'mild' | 'high') => {
+    const nextDataset =
+      scenario === 'high'
+        ? buildSampleDriftDataset()
+        : scenario === 'mild'
+        ? buildMildDriftDataset()
+        : buildInstantAnchorDataset();
+    saveAdlHistory(nextDataset);
+    const report = evaluateMindBodyAdlDrift(nextDataset);
+    setAdlReport(report);
+
+    if (scenario === 'steady') {
+      setToastAlert(null);
+      return;
+    }
+
+    setToastAlert({
+      title: report.notificationTitle,
+      body: report.notificationBody,
+      severity: scenario === 'high' ? 'high' : 'mild',
+    });
+
+    if (scenario === 'mild') {
+      await dispatchSystemWellbeingNotification(report, () => {
+        setToastAlert(null);
+        setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
+        setResidentStage('companion');
+      });
+    } else if (scenario === 'high') {
+      await dispatchSystemWellbeingNotification(report, () => {
+        handleDirectClinicalConsultation();
+      });
+    }
   };
 
   const navigateTo = (portal: ActivePortal, stage?: ResidentStage) => {
@@ -324,6 +354,44 @@ export default function MizanCareApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
+      {/* Floating Push Notification Banner (Visible on All Devices & Browsers) */}
+      {toastAlert && (
+        <div className="fixed bottom-5 right-4 left-4 sm:left-auto sm:w-96 z-50 rounded-2xl bg-stone-900 text-white p-4 shadow-xl border border-stone-700 space-y-2.5">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+              <BellRing className="w-4 h-4 shrink-0" />
+              <span>{toastAlert.title}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setToastAlert(null)}
+              className="text-stone-400 hover:text-white cursor-pointer"
+              aria-label="Close alert"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-xs text-stone-200 leading-relaxed">{toastAlert.body}</p>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                if (toastAlert.severity === 'high') {
+                  handleDirectClinicalConsultation();
+                } else {
+                  setToastAlert(null);
+                  setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
+                  setResidentStage('companion');
+                }
+              }}
+              className="px-3.5 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold cursor-pointer"
+            >
+              {toastAlert.severity === 'high' ? 'Book Consultation Now' : 'Open 3-Question Check'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Clean, Balanced Top Header */}
       <header className="bg-[#FFFEFB]/95 backdrop-blur-xs border-b border-stone-200/80 sticky top-0 z-40">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
@@ -464,7 +532,7 @@ export default function MizanCareApp() {
           <>
             {residentStage === 'consent' && (
               <div className="space-y-6">
-                {/* Visual Mind-Body Indicators Card (No Smartwatch Image — Pure Visual Indicators + Tiered Clinic Automation) */}
+                {/* Visual Mind-Body Indicators Card */}
                 <div className="max-w-3xl mx-auto bg-[#FFFEFB] border border-stone-200 rounded-3xl shadow-xs p-5 sm:p-7 space-y-5">
                   <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-stone-100">
                     <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-900 bg-teal-50 border border-teal-200 px-3 py-1 rounded-full">
@@ -514,9 +582,9 @@ export default function MizanCareApp() {
                       {adlReport.headlineEn}
                     </h2>
                     <p className="text-xs text-stone-600 leading-relaxed">
-                      Continuous everyday indicators help spot early strain before it builds up, guiding
-                      mild changes to a 3-question check-in, and high shifts directly to a physical
-                      consultation.
+                      Continuous everyday indicators help spot early strain before it builds up,
+                      guiding mild changes to a 3-question check-in and high shifts directly to a
+                      physical consultation.
                     </p>
                   </div>
 
@@ -601,7 +669,6 @@ export default function MizanCareApp() {
                     </div>
                   </div>
 
-                  {/* Tiered Automated Action Banner (Mild Shift -> 3-Question Check | High Shift -> Direct Physical Consultation) */}
                   {adlReport.severity === 'mild_drift' && (
                     <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="text-xs text-amber-950 leading-relaxed">
@@ -611,6 +678,7 @@ export default function MizanCareApp() {
                       <button
                         type="button"
                         onClick={() => {
+                          setToastAlert(null);
                           setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
                           setResidentStage('companion');
                         }}
@@ -640,6 +708,7 @@ export default function MizanCareApp() {
                         <button
                           type="button"
                           onClick={() => {
+                            setToastAlert(null);
                             setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
                             setResidentStage('companion');
                           }}
@@ -967,7 +1036,7 @@ export default function MizanCareApp() {
           <div className="flex items-center gap-2">
             <Shield className="w-4 h-4 text-teal-700 shrink-0" />
             <span>
-              Mizan Care supports early self-reflection and connection to care—not a medical
+              Mizan Care supports early self-reflection and connection to care, not a medical
               diagnosis.
             </span>
           </div>

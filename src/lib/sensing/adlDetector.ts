@@ -101,9 +101,6 @@ export function buildInstantAnchorDataset(
   return days;
 }
 
-/**
- * Mild 3-Day Shift Dataset (2 domains shifted -> recommends brief 3-question check-in)
- */
 export function buildMildDriftDataset(): DailyAdlSnapshot[] {
   const days: DailyAdlSnapshot[] = [];
   const now = typeof window !== 'undefined' ? Date.now() : Date.parse('2026-11-18T12:00:00Z');
@@ -135,9 +132,6 @@ export function buildMildDriftDataset(): DailyAdlSnapshot[] {
   return days;
 }
 
-/**
- * High 3-Day Shift Dataset (all 3 domains shifted -> triggers direct clinical consultation pathway)
- */
 export function buildSampleDriftDataset(): DailyAdlSnapshot[] {
   const days: DailyAdlSnapshot[] = [];
   const now = typeof window !== 'undefined' ? Date.now() : Date.parse('2026-11-18T12:00:00Z');
@@ -261,10 +255,10 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
       headlineAr: isHighShift
         ? 'تغيّر ملحوظ خلال 3 أيام في النوم والحركة وراحة الجسد'
         : 'تغيّر طفيف في نومك ونشاطك اليومي خلال الأيام الثلاثة الماضية',
-      notificationTitle: 'Mizan Care · Daily Rhythm Check',
+      notificationTitle: 'Mizan Care · Daily Rhythm Alert',
       notificationBody: isHighShift
-        ? `Significant 3-day shift detected: ${summarySentence}. Direct clinician consultation is recommended.`
-        : `Mild shift detected: ${summarySentence}. A quick 3-question check-in is recommended.`,
+        ? `Significant 3-day shift detected: ${summarySentence}. Tap to book a direct physical consultation.`
+        : `Mild shift detected: ${summarySentence}. Tap for a quick 3-question check-in.`,
       findings,
       contextualExplanation: `Over the past 3 days, your sleep (${recentSummary.sleepHours}h vs your usual ${baselineSummary.sleepHours}h) and daily energy rhythm have shifted. Stress and emotional overload often affect sleep, appetite, and physical energy first.`,
       baselineSummary,
@@ -294,9 +288,6 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   };
 }
 
-/**
- * Guaranteed 3-Question Generator: Always returns exactly 3 distinct questions.
- */
 export function generateAdaptiveQuestions(report: AdlDriftReport): AdaptiveQuestion[] {
   const q1: AdaptiveQuestion = {
     id: 'q-sleep',
@@ -321,9 +312,9 @@ export function generateAdaptiveQuestions(report: AdlDriftReport): AdaptiveQuest
     id: 'q-appetite',
     domain: 'appetite',
     promptEn:
-      'How has your appetite been lately—for example, feeling hungry but finding it hard to eat, skipping meals, or feeling stomach tightness?',
+      'How has your appetite been lately, for example feeling hungry but finding it hard to eat, skipping meals, or feeling stomach tightness?',
     promptAr:
-      'كيف كانت شهيتك للطعام مؤخراً — مثل الشعور بالجوع مع صعوبة في الأكل، أو تفويت الوجبات، أو انقباض المعدة؟',
+      'كيف كانت شهيتك للطعام مؤخراً، مثل الشعور بالجوع مع صعوبة في الأكل، أو تفويت الوجبات، أو انقباض المعدة؟',
     subtextEn: '2 of 3 · Appetite & Body Signals',
     subtextAr: '2 من 3 · الشهية وإشارات الجسد',
     options: [
@@ -368,4 +359,34 @@ export function generateAdaptiveQuestions(report: AdlDriftReport): AdaptiveQuest
   };
 
   return [q1, q2, q3];
+}
+
+export async function dispatchSystemWellbeingNotification(
+  report: AdlDriftReport,
+  onNotificationTap?: () => void
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return false;
+  }
+
+  if (Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
+
+  if (Notification.permission !== 'granted') {
+    return false;
+  }
+
+  const notif = new Notification(report.notificationTitle, {
+    body: report.notificationBody,
+    tag: 'mizan-mind-body-drift',
+  });
+
+  notif.onclick = () => {
+    window.focus();
+    notif.close();
+    onNotificationTap?.();
+  };
+
+  return true;
 }
