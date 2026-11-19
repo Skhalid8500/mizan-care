@@ -10,13 +10,13 @@ export interface ConsentPreferences {
 }
 
 interface ConsentGateProps {
-  onProceed: (prefs: ConsentPreferences) => void;
+  onChange?: (prefs: ConsentPreferences) => void;
   onWipeLocalVault?: () => void;
   hasExistingLocalData?: boolean;
 }
 
 export default function ConsentGate({
-  onProceed,
+  onChange,
   onWipeLocalVault,
   hasExistingLocalData = false,
 }: ConsentGateProps) {
@@ -27,7 +27,11 @@ export default function ConsentGate({
   });
 
   const togglePref = (key: keyof ConsentPreferences) => {
-    setPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
+    setPrefs((prev) => {
+      const updated = { ...prev, [key]: !prev[key] };
+      onChange?.(updated);
+      return updated;
+    });
   };
 
   return (
@@ -59,7 +63,7 @@ export default function ConsentGate({
         </div>
 
         {/* Plain-Language Privacy Preferences */}
-        <div className="space-y-3 mb-8">
+        <div className="space-y-3 mb-6">
           <div className="flex items-start justify-between gap-4 p-4 rounded-2xl border border-stone-200/90 bg-stone-50/70">
             <div>
               <div className="font-semibold text-stone-900 text-sm">
@@ -144,30 +148,22 @@ export default function ConsentGate({
           </div>
         </div>
 
-        {/* Primary Action Row */}
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-stone-100">
-          {hasExistingLocalData && onWipeLocalVault ? (
+        {/* Clean Privacy Footer Row */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-stone-100">
+          <span className="text-xs text-stone-500">
+            Every toggle is optional. You stay in control throughout.
+          </span>
+
+          {hasExistingLocalData && onWipeLocalVault && (
             <button
               type="button"
               onClick={onWipeLocalVault}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-600 hover:text-rose-700"
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-600 hover:text-rose-700 cursor-pointer"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Erase saved history on this device
             </button>
-          ) : (
-            <span className="text-xs text-stone-500">
-              Every toggle is optional. You stay in control throughout.
-            </span>
           )}
-
-          <button
-            type="button"
-            onClick={() => onProceed(prefs)}
-            className="w-full sm:w-auto px-7 py-3.5 rounded-2xl bg-teal-800 hover:bg-teal-900 text-white font-medium text-sm transition shadow-xs cursor-pointer"
-          >
-            Begin Quiet Check-In
-          </button>
         </div>
       </div>
     </div>
