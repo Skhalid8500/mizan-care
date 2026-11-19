@@ -5,11 +5,6 @@ import {
   AdlDriftReport,
   AdaptiveQuestion,
   generateAdaptiveQuestions,
-  buildInstantAnchorDataset,
-  buildMildDriftDataset,
-  buildSampleDriftDataset,
-  saveAdlHistory,
-  evaluateMindBodyAdlDrift,
 } from '@/lib/sensing/adlDetector';
 import {
   Who5Responses,
@@ -34,7 +29,6 @@ import {
 
 interface MizanCompanionProps {
   adlReport: AdlDriftReport;
-  onReportUpdated: (report: AdlDriftReport) => void;
   history: HistoricalRecord[];
   onCompleteAdaptiveCheckIn: (payload: {
     who5: Who5Responses;
@@ -109,7 +103,6 @@ const SELF_CARE_GUIDES = [
 
 export default function MizanCompanion({
   adlReport,
-  onReportUpdated,
   history,
   onCompleteAdaptiveCheckIn,
   onDirectConsult,
@@ -199,7 +192,6 @@ export default function MizanCompanion({
       'speechSynthesis' in window ? window.speechSynthesis.getVoices() : [];
 
     if (currentLang === 'ar') {
-      // 1. Try native Arabic voice on phone/PC first (ar-AE, ar-SA, ar-EG, etc.)
       const arabicVoice = voices.find((v) =>
         v.lang.toLowerCase().startsWith('ar')
       );
@@ -213,7 +205,6 @@ export default function MizanCompanion({
         return;
       }
 
-      // 2. Automatic Arabic TTS audio fallback when Windows/desktop lacks Arabic voice packs
       const encoded = encodeURIComponent(text);
       const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ar&q=${encoded}`;
       const audio = new Audio(ttsUrl);
@@ -225,7 +216,6 @@ export default function MizanCompanion({
       return;
     }
 
-    // English native Web Speech
     if ('speechSynthesis' in window) {
       const enVoice =
         voices.find((v) => v.lang.toLowerCase().startsWith('en')) || null;
@@ -265,17 +255,6 @@ export default function MizanCompanion({
     runStep(0);
   };
 
-  const applyPresetScenario = (scenario: 'steady' | 'mild' | 'high') => {
-    const dataset =
-      scenario === 'high'
-        ? buildSampleDriftDataset()
-        : scenario === 'mild'
-        ? buildMildDriftDataset()
-        : buildInstantAnchorDataset();
-    saveAdlHistory(dataset);
-    onReportUpdated(evaluateMindBodyAdlDrift(dataset));
-  };
-
   const handleCompanionChatSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const text = userReflectionText.trim();
@@ -301,8 +280,8 @@ export default function MizanCompanion({
       setSafetyFlagged(true);
       reply =
         lang === 'ar'
-          ? 'شكراً لثقتك ومشاركتي ما تمر به. سلامتك هي الأهم الآن—تتوفر خطوط دعم مجانية وسرية في الإمارات على مدار الساعة (800-SAKINA و 800-HOPE) أو التواصل المباشر مع مختص.'
-          : 'Thank you for trusting me with how heavy things feel right now. Your safety matters most—free, confidential support in the UAE is available right now (800-SAKINA and 800-HOPE), along with direct connection to a licensed clinician.';
+          ? 'شكراً لثقتك ومشاركتي ما تمر به. سلامتك هي الأهم الآن، وتتوفر خطوط دعم مجانية وسرية في الإمارات على مدار الساعة (800-SAKINA و 800-HOPE) أو التواصل المباشر مع مختص.'
+          : 'Thank you for trusting me with how heavy things feel right now. Your safety matters most, and free, confidential support in the UAE is available right now (800-SAKINA and 800-HOPE), along with direct connection to a licensed clinician.';
     } else if (
       lower.includes('eat') ||
       lower.includes('food') ||
@@ -341,7 +320,7 @@ export default function MizanCompanion({
     }
 
     stopVoiceGuide();
-    const totalAdaptiveScore = Object.values(updated).reduce((a, b) => a + b, 0); // 0 to 9
+    const totalAdaptiveScore = Object.values(updated).reduce((a, b) => a + b, 0);
     const mappedWho5Item = Math.max(0, Math.min(5, Math.round(5 - (totalAdaptiveScore / 9) * 5)));
 
     const who5: Who5Responses = {
@@ -388,43 +367,14 @@ export default function MizanCompanion({
 
   return (
     <div dir={isRtl ? 'rtl' : 'ltr'} className="max-w-4xl mx-auto space-y-6">
-      {/* Top State Switcher & Language Bar */}
+      {/* Live Personal Rhythm Status & Language Toggle */}
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => applyPresetScenario('steady')}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium border cursor-pointer ${
-              adlReport.severity === 'stable'
-                ? 'bg-teal-800 text-white border-teal-800'
-                : 'bg-white text-stone-700 border-stone-200 hover:border-teal-600'
-            }`}
-          >
-            {lang === 'ar' ? 'إيقاع مستقر' : 'Steady Rhythm'}
-          </button>
-          <button
-            type="button"
-            onClick={() => applyPresetScenario('mild')}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium border cursor-pointer ${
-              adlReport.severity === 'mild_drift'
-                ? 'bg-amber-600 text-white border-amber-600'
-                : 'bg-amber-50 text-amber-950 border-amber-200 hover:bg-amber-100'
-            }`}
-          >
-            {lang === 'ar' ? 'تغيّر طفيف (3 أسئلة)' : 'Mild Shift (3-Question Check)'}
-          </button>
-          <button
-            type="button"
-            onClick={() => applyPresetScenario('high')}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium border cursor-pointer ${
-              adlReport.severity === 'notable_drift'
-                ? 'bg-rose-700 text-white border-rose-700'
-                : 'bg-rose-50 text-rose-950 border-rose-200 hover:bg-rose-100'
-            }`}
-          >
-            {lang === 'ar' ? 'تغيّر كبير (استشارة مباشرة)' : 'High Shift (Direct Consult)'}
-          </button>
-        </div>
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-teal-900 bg-teal-50 border border-teal-200 px-3 py-1.5 rounded-full">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          {lang === 'ar'
+            ? 'متابعة حية لإيقاعك اليومي على جهازك'
+            : 'Live Personal Rhythm · Private on Your Device'}
+        </span>
 
         <button
           type="button"
@@ -451,7 +401,7 @@ export default function MizanCompanion({
             <p className="text-xs sm:text-sm text-rose-100 leading-relaxed">
               {lang === 'ar'
                 ? 'نظراً لوجود تغيّر ملحوظ في النوم والحركة وراحة الجسد خلال 3 أيام، يمكنك حجز استشارة مباشرة الآن أو إكمال الأسئلة الثلاثة أدناه.'
-                : 'Because your sleep, movement, and body recovery all shifted significantly over 3 days, you can book a direct physical consultation right now—or answer the 3 quick questions below.'}
+                : 'Because your sleep, movement, and body recovery all shifted significantly over 3 days, you can book a direct physical consultation right now, or answer the 3 quick questions below.'}
             </p>
           </div>
           <button

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import ConsentGate, { ConsentPreferences } from '@/components/ConsentGate';
 import MizanCompanion from '@/components/MizanCompanion';
 import ResultsAndHandoff from '@/components/ResultsAndHandoff';
@@ -28,8 +28,6 @@ import {
   saveAdlHistory,
   evaluateMindBodyAdlDrift,
   buildInstantAnchorDataset,
-  buildMildDriftDataset,
-  buildSampleDriftDataset,
   dispatchSystemWellbeingNotification,
 } from '@/lib/sensing/adlDetector';
 import {
@@ -108,14 +106,65 @@ export default function MizanCareApp() {
 
   const [liveCompletedFollowups, setLiveCompletedFollowups] = useState(0);
 
+  /**
+   * Direct Automated Escalation to Physical Consultation when High 3-Day Drift occurs
+   */
+  const triggerDirectClinicalConsultation = useCallback(
+    (reportToUse: AdlDriftReport, currentHistory: HistoricalRecord[]) => {
+      setToastAlert(null);
+      const who5: Who5Responses = {
+        q1_cheerful: 2,
+        q2_calm: 2,
+        q3_active: 1,
+        q4_rested: 1,
+        q5_interested: 2,
+      };
+      const physicalContext: PhysicalContextResponses = {
+        sleepDisruption: reportToUse.suggestedPhysicalContext.sleepDisruption || 3,
+        painOrTension: reportToUse.suggestedPhysicalContext.painOrTension || 2,
+        fatigueOrRoleLimit: reportToUse.suggestedPhysicalContext.fatigueOrRoleLimit || 3,
+      };
+      const result = evaluateBiopsychosocialTriage({
+        who5,
+        physicalContext,
+        history: currentHistory,
+      });
+      result.whatThisMeans.unshift(
+        `Automated Early Escalation: ${reportToUse.contextualExplanation}`
+      );
+      setLatestAssessment({ who5, physicalContext, result });
+      setResidentStage('results');
+    },
+    []
+  );
+
   useEffect(() => {
     const existing = loadAdlHistory();
-    if (existing.length > 0) {
-      setAdlReport(evaluateMindBodyAdlDrift(existing));
-    } else {
-      const initialAnchor = buildInstantAnchorDataset();
-      saveAdlHistory(initialAnchor);
-      setAdlReport(evaluateMindBodyAdlDrift(initialAnchor));
+    const activeRecords = existing.length > 0 ? existing : buildInstantAnchorDataset();
+    if (existing.length === 0) {
+      saveAdlHistory(activeRecords);
+    }
+
+    const report = evaluateMindBodyAdlDrift(activeRecords);
+    setAdlReport(report);
+
+    if (report.driftDetected) {
+      const isHigh = report.severity === 'notable_drift';
+      setToastAlert({
+        title: report.notificationTitle,
+        body: report.notificationBody,
+        severity: isHigh ? 'high' : 'mild',
+      });
+
+      dispatchSystemWellbeingNotification(report, () => {
+        if (isHigh) {
+          triggerDirectClinicalConsultation(report, []);
+        } else {
+          setToastAlert(null);
+          setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
+          setResidentStage('companion');
+        }
+      });
     }
 
     const savedPin = window.localStorage.getItem('mizan_active_pin') || '';
@@ -128,7 +177,7 @@ export default function MizanCareApp() {
       setActiveKey(savedKey);
       setManualKeyInput(savedKey);
     }
-  }, []);
+  }, [triggerDirectClinicalConsultation]);
 
   useEffect(() => {
     (async () => {
@@ -174,73 +223,22 @@ export default function MizanCareApp() {
         });
       }
       saveAdlHistory(current);
-      setAdlReport(evaluateMindBodyAdlDrift(current));
+      const updatedReport = evaluateMindBodyAdlDrift(current);
+      setAdlReport(updatedReport);
+
+      if (updatedReport.driftDetected) {
+        const isHigh = updatedReport.severity === 'notable_drift';
+        setToastAlert({
+          title: updatedReport.notificationTitle,
+          body: updatedReport.notificationBody,
+          severity: isHigh ? 'high' : 'mild',
+        });
+      }
     };
 
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, []);
-
-  const handleDirectClinicalConsultation = () => {
-    setToastAlert(null);
-    const who5: Who5Responses = {
-      q1_cheerful: 2,
-      q2_calm: 2,
-      q3_active: 1,
-      q4_rested: 1,
-      q5_interested: 2,
-    };
-    const physicalContext: PhysicalContextResponses = {
-      sleepDisruption: adlReport.suggestedPhysicalContext.sleepDisruption || 3,
-      painOrTension: adlReport.suggestedPhysicalContext.painOrTension || 2,
-      fatigueOrRoleLimit: adlReport.suggestedPhysicalContext.fatigueOrRoleLimit || 3,
-    };
-    const result = evaluateBiopsychosocialTriage({
-      who5,
-      physicalContext,
-      history,
-    });
-    result.whatThisMeans.unshift(
-      `Automated Early Escalation: ${adlReport.contextualExplanation}`
-    );
-    setLatestAssessment({ who5, physicalContext, result });
-    setResidentStage('results');
-  };
-
-  const applyHomeScenario = async (scenario: 'steady' | 'mild' | 'high') => {
-    const nextDataset =
-      scenario === 'high'
-        ? buildSampleDriftDataset()
-        : scenario === 'mild'
-        ? buildMildDriftDataset()
-        : buildInstantAnchorDataset();
-    saveAdlHistory(nextDataset);
-    const report = evaluateMindBodyAdlDrift(nextDataset);
-    setAdlReport(report);
-
-    if (scenario === 'steady') {
-      setToastAlert(null);
-      return;
-    }
-
-    setToastAlert({
-      title: report.notificationTitle,
-      body: report.notificationBody,
-      severity: scenario === 'high' ? 'high' : 'mild',
-    });
-
-    if (scenario === 'mild') {
-      await dispatchSystemWellbeingNotification(report, () => {
-        setToastAlert(null);
-        setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
-        setResidentStage('companion');
-      });
-    } else if (scenario === 'high') {
-      await dispatchSystemWellbeingNotification(report, () => {
-        handleDirectClinicalConsultation();
-      });
-    }
-  };
 
   const navigateTo = (portal: ActivePortal, stage?: ResidentStage) => {
     setActivePortal(portal);
@@ -269,6 +267,23 @@ export default function MizanCareApp() {
   }) => {
     setLatestAssessment(payload);
     setResidentStage('results');
+
+    const today = new Date().toISOString().slice(0, 10);
+    const current = loadAdlHistory();
+    const idx = current.findIndex((d) => d.date === today);
+    const sleepImpact = payload.physicalContext?.sleepDisruption ?? 0;
+    const energyImpact = payload.physicalContext?.fatigueOrRoleLimit ?? 0;
+
+    if (idx >= 0) {
+      if (sleepImpact >= 2) {
+        current[idx].sleepHours = Math.max(4.5, Number((current[idx].sleepHours - 1.5).toFixed(1)));
+      }
+      if (energyImpact >= 2) {
+        current[idx].steps = Math.max(2500, current[idx].steps - 2000);
+      }
+      saveAdlHistory(current);
+      setAdlReport(evaluateMindBodyAdlDrift(current));
+    }
 
     const nowIso = new Date().toISOString();
     const newEntry: HistoricalRecord = {
@@ -354,7 +369,7 @@ export default function MizanCareApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Floating Push Notification Banner (Visible on All Devices & Browsers) */}
+      {/* Floating Push Notification Banner (Triggers Automatically from Live Drift) */}
       {toastAlert && (
         <div className="fixed bottom-5 right-4 left-4 sm:left-auto sm:w-96 z-50 rounded-2xl bg-stone-900 text-white p-4 shadow-xl border border-stone-700 space-y-2.5">
           <div className="flex items-start justify-between gap-2">
@@ -377,7 +392,7 @@ export default function MizanCareApp() {
               type="button"
               onClick={() => {
                 if (toastAlert.severity === 'high') {
-                  handleDirectClinicalConsultation();
+                  triggerDirectClinicalConsultation(adlReport, history);
                 } else {
                   setToastAlert(null);
                   setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
@@ -532,7 +547,7 @@ export default function MizanCareApp() {
           <>
             {residentStage === 'consent' && (
               <div className="space-y-6">
-                {/* Visual Mind-Body Indicators Card */}
+                {/* Visual Mind-Body Indicators Card (100% Live Dynamic Indicators) */}
                 <div className="max-w-3xl mx-auto bg-[#FFFEFB] border border-stone-200 rounded-3xl shadow-xs p-5 sm:p-7 space-y-5">
                   <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-stone-100">
                     <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-900 bg-teal-50 border border-teal-200 px-3 py-1 rounded-full">
@@ -540,41 +555,9 @@ export default function MizanCareApp() {
                       Today’s Mind–Body Balance Indicators
                     </span>
 
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => applyHomeScenario('steady')}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
-                          adlReport.severity === 'stable'
-                            ? 'bg-teal-800 text-white border-teal-800'
-                            : 'bg-stone-50 text-stone-700 border-stone-200'
-                        }`}
-                      >
-                        Steady
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => applyHomeScenario('mild')}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
-                          adlReport.severity === 'mild_drift'
-                            ? 'bg-amber-600 text-white border-amber-600'
-                            : 'bg-amber-50 text-amber-950 border-amber-200'
-                        }`}
-                      >
-                        Mild Shift
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => applyHomeScenario('high')}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
-                          adlReport.severity === 'notable_drift'
-                            ? 'bg-rose-700 text-white border-rose-700'
-                            : 'bg-rose-50 text-rose-950 border-rose-200'
-                        }`}
-                      >
-                        High Shift
-                      </button>
-                    </div>
+                    <span className="text-[11px] font-medium text-stone-500 bg-stone-50 border border-stone-200/80 px-3 py-1 rounded-full">
+                      Live Personal Baseline · Auto-Updated
+                    </span>
                   </div>
 
                   <div className="space-y-2">
@@ -582,13 +565,13 @@ export default function MizanCareApp() {
                       {adlReport.headlineEn}
                     </h2>
                     <p className="text-xs text-stone-600 leading-relaxed">
-                      Continuous everyday indicators help spot early strain before it builds up,
-                      guiding mild changes to a 3-question check-in and high shifts directly to a
-                      physical consultation.
+                      Continuous everyday indicators help spot early strain before it builds up, guiding
+                      mild changes to a 3-question check-in, and high shifts directly to a physical
+                      consultation.
                     </p>
                   </div>
 
-                  {/* 3 Visual Indicator Bars */}
+                  {/* 3 Live Visual Indicator Bars */}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                     <div className="p-4 rounded-2xl bg-stone-50/80 border border-stone-200/80 space-y-2.5">
                       <div className="flex items-center justify-between text-xs font-semibold text-stone-700">
@@ -669,6 +652,7 @@ export default function MizanCareApp() {
                     </div>
                   </div>
 
+                  {/* Tiered Automated Action Banner (Mild Shift -> 3-Question Check | High Shift -> Direct Physical Consultation) */}
                   {adlReport.severity === 'mild_drift' && (
                     <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                       <div className="text-xs text-amber-950 leading-relaxed">
@@ -699,7 +683,7 @@ export default function MizanCareApp() {
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
                         <button
                           type="button"
-                          onClick={handleDirectClinicalConsultation}
+                          onClick={() => triggerDirectClinicalConsultation(adlReport, history)}
                           className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-stone-100 text-stone-900 text-xs font-bold cursor-pointer"
                         >
                           <Stethoscope className="w-3.5 h-3.5 text-teal-800" />
@@ -749,10 +733,9 @@ export default function MizanCareApp() {
             {residentStage === 'companion' && (
               <MizanCompanion
                 adlReport={adlReport}
-                onReportUpdated={(updatedReport) => setAdlReport(updatedReport)}
                 history={history}
                 onCompleteAdaptiveCheckIn={(payload) => handleCheckInComplete(payload)}
-                onDirectConsult={handleDirectClinicalConsultation}
+                onDirectConsult={() => triggerDirectClinicalConsultation(adlReport, history)}
               />
             )}
 
