@@ -19,6 +19,7 @@ import {
   Phq9Responses,
   HistoricalRecord,
   SupportTier,
+  evaluateBiopsychosocialTriage,
 } from '@/lib/clinical/triage';
 import {
   AuthorizedShareScope,
@@ -59,6 +60,7 @@ import {
   CalendarCheck,
   MapPin,
   KeyRound,
+  PlusCircle,
 } from 'lucide-react';
 
 interface ResultsAndHandoffProps {
@@ -69,6 +71,13 @@ interface ResultsAndHandoffProps {
   phq9?: Phq9Responses;
   history: HistoricalRecord[];
   onStartNewCheckIn: () => void;
+  onReinterpretAssessment?: (updated: {
+    who5: Who5Responses;
+    physicalContext?: PhysicalContextResponses;
+    gad7?: Gad7Responses;
+    phq9?: Phq9Responses;
+    result: ExplainableResult;
+  }) => void;
   onHandoffCreated?: (pin: string, keyBase64Url: string) => void;
 }
 
@@ -119,6 +128,36 @@ const SELF_GUIDED_EXERCISES = [
   },
 ];
 
+const WHO5_MODULE_PROMPTS = [
+  'I have felt cheerful and in good spirits',
+  'I have felt calm and relaxed',
+  'I have felt active and vigorous',
+  'I woke up feeling fresh and rested',
+  'My daily life has been filled with things that interest me',
+];
+
+const GAD7_MODULE_PROMPTS = [
+  'Feeling nervous, anxious, or on edge',
+  'Not being able to stop or control worrying',
+  'Worrying too much about different things',
+  'Trouble relaxing',
+  'Being so restless that it is hard to sit still',
+  'Becoming easily annoyed or irritable',
+  'Feeling afraid, as if something awful might happen',
+];
+
+const PHQ9_MODULE_PROMPTS = [
+  'Little interest or pleasure in doing things',
+  'Feeling down, depressed, or hopeless',
+  'Trouble falling or staying asleep, or sleeping too much',
+  'Feeling tired or having little energy',
+  'Poor appetite or overeating',
+  'Feeling bad about yourself — or that you are a failure',
+  'Trouble concentrating on things',
+  'Moving or speaking slowly, or being unusually fidgety/restless',
+  'Thoughts that you would be better off dead, or of hurting yourself in some way',
+];
+
 export default function ResultsAndHandoff({
   result,
   who5,
@@ -127,9 +166,33 @@ export default function ResultsAndHandoff({
   phq9,
   history,
   onStartNewCheckIn,
+  onReinterpretAssessment,
   onHandoffCreated,
 }: ResultsAndHandoffProps) {
   const [activePathway, setActivePathway] = useState<SupportTier>(result.tier);
+
+  // Independent Optional Deepening Module Drawer State
+  const [openModule, setOpenModule] = useState<'who5' | 'gad7' | 'phq9' | null>(null);
+  const [who5Draft, setWho5Draft] = useState<number[]>([
+    who5.q1_cheerful,
+    who5.q2_calm,
+    who5.q3_active,
+    who5.q4_rested,
+    who5.q5_interested,
+  ]);
+  const [gad7Draft, setGad7Draft] = useState<number[]>(gad7?.items ?? [0, 0, 0, 0, 0, 0, 0]);
+  const [phq9Draft, setPhq9Draft] = useState<number[]>(
+    phq9?.items ?? [0, 0, 0, 0, 0, 0, 0, 0, 0]
+  );
+  const [completedModules, setCompletedModules] = useState<{
+    who5: boolean;
+    gad7: boolean;
+    phq9: boolean;
+  }>({
+    who5: false,
+    gad7: Boolean(gad7),
+    phq9: Boolean(phq9),
+  });
 
   const defaultClinic =
     CLINIC_DIRECTORY.find((c) => c.tier === result.tier) || CLINIC_DIRECTORY[0];
@@ -173,6 +236,75 @@ export default function ResultsAndHandoff({
   const selectedClinic =
     CLINIC_DIRECTORY.find((c) => c.id === selectedClinicId) || CLINIC_DIRECTORY[0];
 
+  const handleSaveModuleAndReinterpret = (moduleKey: 'who5' | 'gad7' | 'phq9') => {
+    const nextCompleted = { ...completedModules, [moduleKey]: true };
+    setCompletedModules(nextCompleted);
+
+    const nextWho5: Who5Responses = nextCompleted.who5
+      ? {
+          q1_cheerful: who5Draft[0],
+          q2_calm: who5Draft[1],
+          q3_active: who5Draft[2],
+          q4_rested: who5Draft[3],
+          q5_interested: who5Draft[4],
+        }
+      : who5;
+
+    const nextGad7: Gad7Responses | undefined = nextCompleted.gad7
+      ? {
+          items: [
+            gad7Draft[0] ?? 0,
+            gad7Draft[1] ?? 0,
+            gad7Draft[2] ?? 0,
+            gad7Draft[3] ?? 0,
+            gad7Draft[4] ?? 0,
+            gad7Draft[5] ?? 0,
+            gad7Draft[6] ?? 0,
+          ],
+        }
+      : gad7;
+
+    const nextPhq9: Phq9Responses | undefined = nextCompleted.phq9
+      ? {
+          items: [
+            phq9Draft[0] ?? 0,
+            phq9Draft[1] ?? 0,
+            phq9Draft[2] ?? 0,
+            phq9Draft[3] ?? 0,
+            phq9Draft[4] ?? 0,
+            phq9Draft[5] ?? 0,
+            phq9Draft[6] ?? 0,
+            phq9Draft[7] ?? 0,
+            phq9Draft[8] ?? 0,
+          ],
+        }
+      : phq9;
+
+    const recalculated = evaluateBiopsychosocialTriage({
+      who5: nextWho5,
+      physicalContext,
+      gad7: nextGad7,
+      phq9: nextPhq9,
+      history,
+    });
+
+    setShareScope((prev) => ({
+      ...prev,
+      includeGad7: Boolean(nextGad7),
+      includePhq9: Boolean(nextPhq9),
+    }));
+    setActivePathway(recalculated.tier);
+    setOpenModule(null);
+
+    onReinterpretAssessment?.({
+      who5: nextWho5,
+      physicalContext,
+      gad7: nextGad7,
+      phq9: nextPhq9,
+      result: recalculated,
+    });
+  };
+
   const handleSelectClinic = (clinicId: string) => {
     setSelectedClinicId(clinicId);
     const found = CLINIC_DIRECTORY.find((c) => c.id === clinicId);
@@ -195,8 +327,8 @@ export default function ResultsAndHandoff({
       const scopeLabels: string[] = [];
       if (shareScope.includeWho5) scopeLabels.push('Wellbeing Summary');
       if (shareScope.includePhysicalContext && physicalContext)
-        scopeLabels.push('Sleep & Body Comfort');
-      if (shareScope.includeGad7 && result.gad7Total !== null) scopeLabels.push('Anxiety Check-In');
+        scopeLabels.push('Sleep, Appetite & Body Comfort');
+      if (shareScope.includeGad7 && result.gad7Total !== null) scopeLabels.push('Worry Check-In');
       if (shareScope.includePhq9 && result.phq9Total !== null) scopeLabels.push('Mood Check-In');
       if (shareScope.includePreferredLanguage) scopeLabels.push('Language Preference');
 
@@ -393,40 +525,201 @@ export default function ResultsAndHandoff({
           </button>
         </div>
 
+        {/* 4 Score Cards (Interactive: Tap to Complete Optional Sections Independently) */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5 mb-6">
-          <div className="p-4 rounded-2xl bg-teal-50/60 border border-teal-100">
-            <div className="text-xs font-medium text-teal-900">Overall Wellbeing</div>
+          <button
+            type="button"
+            onClick={() => setOpenModule(openModule === 'who5' ? null : 'who5')}
+            className="p-4 rounded-2xl bg-teal-50/60 border border-teal-200 hover:border-teal-600 text-left transition cursor-pointer"
+          >
+            <div className="text-xs font-medium text-teal-900 flex items-center justify-between">
+              <span>Overall Wellbeing</span>
+              <PlusCircle className="w-3.5 h-3.5 text-teal-700" />
+            </div>
             <div className="text-2xl font-bold text-stone-900 mt-1">
               {result.who5Standardized}
               <span className="text-xs font-normal text-stone-500"> / 100</span>
             </div>
-            <div className="text-[11px] text-stone-500 mt-0.5">WHO-5 index</div>
-          </div>
+            <div className="text-[11px] text-teal-800 font-medium mt-0.5">
+              {completedModules.who5 ? 'Full 5 items completed ✓' : 'Tap to refine (5 items)'}
+            </div>
+          </button>
 
           <div className="p-4 rounded-2xl bg-amber-50/60 border border-amber-100">
-            <div className="text-xs font-medium text-amber-900">Body &amp; Sleep Load</div>
+            <div className="text-xs font-medium text-amber-900">Body, Sleep &amp; Appetite</div>
             <div className="text-2xl font-bold text-stone-900 mt-1">
-              {result.physicalLoadScore !== null ? `${result.physicalLoadScore} / 9` : 'Skipped'}
+              {result.physicalLoadScore !== null ? `${result.physicalLoadScore} / 9` : 'Checked'}
             </div>
-            <div className="text-[11px] text-stone-500 mt-0.5">Sleep, tension &amp; energy</div>
+            <div className="text-[11px] text-stone-500 mt-0.5">From your 3-question check</div>
           </div>
 
-          <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200/80">
-            <div className="text-xs font-medium text-stone-600">Worry &amp; Tension</div>
-            <div className="text-2xl font-bold text-stone-900 mt-1">
-              {result.gad7Total !== null ? `${result.gad7Total} / 21` : 'Not taken'}
+          <button
+            type="button"
+            onClick={() => setOpenModule(openModule === 'gad7' ? null : 'gad7')}
+            className="p-4 rounded-2xl bg-stone-50 border border-stone-200 hover:border-teal-600 text-left transition cursor-pointer"
+          >
+            <div className="text-xs font-medium text-stone-700 flex items-center justify-between">
+              <span>Worry &amp; Tension</span>
+              <PlusCircle className="w-3.5 h-3.5 text-teal-700" />
             </div>
-            <div className="text-[11px] text-stone-500 mt-0.5">GAD-7 check-in</div>
-          </div>
+            <div className="text-2xl font-bold text-stone-900 mt-1">
+              {result.gad7Total !== null ? `${result.gad7Total} / 21` : 'Optional'}
+            </div>
+            <div className="text-[11px] text-teal-800 font-medium mt-0.5">
+              {result.gad7Total !== null ? 'Completed · Tap to edit' : 'Tap to answer independently'}
+            </div>
+          </button>
 
-          <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200/80">
-            <div className="text-xs font-medium text-stone-600">Mood &amp; Energy</div>
-            <div className="text-2xl font-bold text-stone-900 mt-1">
-              {result.phq9Total !== null ? `${result.phq9Total} / 27` : 'Not taken'}
+          <button
+            type="button"
+            onClick={() => setOpenModule(openModule === 'phq9' ? null : 'phq9')}
+            className="p-4 rounded-2xl bg-stone-50 border border-stone-200 hover:border-teal-600 text-left transition cursor-pointer"
+          >
+            <div className="text-xs font-medium text-stone-700 flex items-center justify-between">
+              <span>Mood &amp; Energy</span>
+              <PlusCircle className="w-3.5 h-3.5 text-teal-700" />
             </div>
-            <div className="text-[11px] text-stone-500 mt-0.5">PHQ-9 check-in</div>
-          </div>
+            <div className="text-2xl font-bold text-stone-900 mt-1">
+              {result.phq9Total !== null ? `${result.phq9Total} / 27` : 'Optional'}
+            </div>
+            <div className="text-[11px] text-teal-800 font-medium mt-0.5">
+              {result.phq9Total !== null ? 'Completed · Tap to edit' : 'Tap to answer independently'}
+            </div>
+          </button>
         </div>
+
+        {/* Independent Optional Module Drawer (Re-Interprets Live with Initial 3 Questions) */}
+        {openModule && (
+          <div className="p-5 sm:p-6 rounded-2xl bg-stone-50 border border-teal-200 mb-6 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-teal-800">
+                  Optional Self-Paced Section
+                </span>
+                <h3 className="font-serif text-lg text-stone-900">
+                  {openModule === 'who5'
+                    ? 'Refine Your 5-Item Wellbeing Reflection'
+                    : openModule === 'gad7'
+                    ? 'Optional Worry & Restlessness Check (7 short items)'
+                    : 'Optional Mood, Energy & Safety Check (9 short items)'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpenModule(null)}
+                className="text-xs text-stone-500 hover:text-stone-900 underline cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+            {openModule === 'who5' && (
+              <div className="space-y-3">
+                {WHO5_MODULE_PROMPTS.map((prompt, idx) => (
+                  <div
+                    key={prompt}
+                    className="p-3.5 rounded-xl bg-white border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  >
+                    <span className="text-xs font-medium text-stone-800">{prompt}</span>
+                    <select
+                      value={who5Draft[idx]}
+                      onChange={(e) => {
+                        const copy = [...who5Draft];
+                        copy[idx] = Number(e.target.value);
+                        setWho5Draft(copy);
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-stone-300 text-xs bg-stone-50"
+                    >
+                      <option value={5}>All of the time</option>
+                      <option value={4}>Most of the time</option>
+                      <option value={3}>More than half the time</option>
+                      <option value={2}>Less than half the time</option>
+                      <option value={1}>Some of the time</option>
+                      <option value={0}>At no time</option>
+                    </select>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => handleSaveModuleAndReinterpret('who5')}
+                  className="px-5 py-2.5 rounded-xl bg-teal-800 hover:bg-teal-900 text-white text-xs font-semibold cursor-pointer"
+                >
+                  Update My Reflection &amp; Re-Interpret
+                </button>
+              </div>
+            )}
+
+            {openModule === 'gad7' && (
+              <div className="space-y-3">
+                {GAD7_MODULE_PROMPTS.map((prompt, idx) => (
+                  <div
+                    key={prompt}
+                    className="p-3.5 rounded-xl bg-white border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                  >
+                    <span className="text-xs font-medium text-stone-800">{prompt}</span>
+                    <select
+                      value={gad7Draft[idx]}
+                      onChange={(e) => {
+                        const copy = [...gad7Draft];
+                        copy[idx] = Number(e.target.value);
+                        setGad7Draft(copy);
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-stone-300 text-xs bg-stone-50"
+                    >
+                      <option value={0}>Not at all</option>
+                      <option value={1}>Several days</option>
+                      <option value={2}>More than half the days</option>
+                      <option value={3}>Nearly every day</option>
+                    </select>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => handleSaveModuleAndReinterpret('gad7')}
+                  className="px-5 py-2.5 rounded-xl bg-teal-800 hover:bg-teal-900 text-white text-xs font-semibold cursor-pointer"
+                >
+                  Combine with My 3 Answers &amp; Re-Interpret
+                </button>
+              </div>
+            )}
+
+            {openModule === 'phq9' && (
+              <div className="space-y-3">
+                {PHQ9_MODULE_PROMPTS.map((prompt, idx) => (
+                  <div
+                    key={prompt}
+                    className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                      idx === 8 ? 'bg-rose-50/70 border-rose-200' : 'bg-white border-stone-200'
+                    }`}
+                  >
+                    <span className="text-xs font-medium text-stone-800">{prompt}</span>
+                    <select
+                      value={phq9Draft[idx]}
+                      onChange={(e) => {
+                        const copy = [...phq9Draft];
+                        copy[idx] = Number(e.target.value);
+                        setPhq9Draft(copy);
+                      }}
+                      className="px-3 py-1.5 rounded-lg border border-stone-300 text-xs bg-stone-50"
+                    >
+                      <option value={0}>Not at all</option>
+                      <option value={1}>Several days</option>
+                      <option value={2}>More than half the days</option>
+                      <option value={3}>Nearly every day</option>
+                    </select>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => handleSaveModuleAndReinterpret('phq9')}
+                  className="px-5 py-2.5 rounded-xl bg-teal-800 hover:bg-teal-900 text-white text-xs font-semibold cursor-pointer"
+                >
+                  Combine with My 3 Answers &amp; Re-Interpret
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {chartData.length >= 2 && (
           <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200 mb-6">
@@ -799,7 +1092,7 @@ export default function ResultsAndHandoff({
                       }
                       className="rounded text-teal-800"
                     />
-                    <span>Sleep &amp; Body Comfort ({result.physicalLoadScore}/9)</span>
+                    <span>Sleep, Appetite &amp; Body Comfort ({result.physicalLoadScore}/9)</span>
                   </label>
                 )}
 

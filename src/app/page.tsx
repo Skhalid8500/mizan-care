@@ -9,8 +9,11 @@ import PublicHealthMonitor from '@/components/PublicHealthMonitor';
 import {
   Who5Responses,
   PhysicalContextResponses,
+  Gad7Responses,
+  Phq9Responses,
   ExplainableResult,
   HistoricalRecord,
+  evaluateBiopsychosocialTriage,
 } from '@/lib/clinical/triage';
 import { ClinicianReplyPayload } from '@/lib/handoff/protocol';
 import {
@@ -21,13 +24,12 @@ import {
 } from '@/lib/crypto/vault';
 import {
   AdlDriftReport,
-  isNativeMobileRuntime,
   loadAdlHistory,
   saveAdlHistory,
   evaluateMindBodyAdlDrift,
-  dispatchSystemWellbeingNotification,
-  buildSampleDriftDataset,
   buildInstantAnchorDataset,
+  buildMildDriftDataset,
+  buildSampleDriftDataset,
 } from '@/lib/sensing/adlDetector';
 import {
   Shield,
@@ -45,9 +47,10 @@ import {
   MapPin,
   KeyRound,
   CheckCircle2,
-  BellRing,
-  Watch,
-  Sparkles,
+  Moon,
+  Activity,
+  HeartPulse,
+  ArrowRight,
 } from 'lucide-react';
 
 type ActivePortal = 'resident' | 'booking_status' | 'support' | 'clinician' | 'monitor';
@@ -67,16 +70,15 @@ export default function MizanCareApp() {
   const [history, setHistory] = useState<HistoricalRecord[]>([]);
   const [hasVaultData, setHasVaultData] = useState(false);
 
-  const [isNativeApp, setIsNativeApp] = useState(false);
-  const [browserSensorEnabled, setBrowserSensorEnabled] = useState(true);
   const [adlReport, setAdlReport] = useState<AdlDriftReport>(() =>
     evaluateMindBodyAdlDrift(buildInstantAnchorDataset())
   );
-  const [notificationToast, setNotificationToast] = useState<string | null>(null);
 
   const [latestAssessment, setLatestAssessment] = useState<{
     who5: Who5Responses;
     physicalContext?: PhysicalContextResponses;
+    gad7?: Gad7Responses;
+    phq9?: Phq9Responses;
     result: ExplainableResult;
   } | null>(null);
 
@@ -99,9 +101,6 @@ export default function MizanCareApp() {
   const [liveCompletedFollowups, setLiveCompletedFollowups] = useState(0);
 
   useEffect(() => {
-    const native = isNativeMobileRuntime();
-    setIsNativeApp(native);
-
     const existing = loadAdlHistory();
     if (existing.length > 0) {
       setAdlReport(evaluateMindBodyAdlDrift(existing));
@@ -143,7 +142,7 @@ export default function MizanCareApp() {
   }, []);
 
   useEffect(() => {
-    if (!browserSensorEnabled || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
 
     const handleVisibility = () => {
       if (document.visibilityState !== 'visible') return;
@@ -172,34 +171,45 @@ export default function MizanCareApp() {
 
     document.addEventListener('visibilitychange', handleVisibility);
     return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [browserSensorEnabled]);
+  }, []);
 
-  const handleToggleBrowserSensor = async () => {
-    const next = !browserSensorEnabled;
-    setBrowserSensorEnabled(next);
-    window.localStorage.setItem('mizan_browser_sensor_on', String(next));
-
-    if (next && 'Notification' in window && Notification.permission === 'default') {
-      await Notification.requestPermission();
-    }
+  const applyHomeScenario = (scenario: 'steady' | 'mild' | 'high') => {
+    const nextDataset =
+      scenario === 'high'
+        ? buildSampleDriftDataset()
+        : scenario === 'mild'
+        ? buildMildDriftDataset()
+        : buildInstantAnchorDataset();
+    saveAdlHistory(nextDataset);
+    setAdlReport(evaluateMindBodyAdlDrift(nextDataset));
   };
 
-  const handleTriggerWellbeingNotification = async () => {
-    const sample = buildSampleDriftDataset();
-    saveAdlHistory(sample);
-    const report = evaluateMindBodyAdlDrift(sample);
-    setAdlReport(report);
-
-    const sentSystemNotif = await dispatchSystemWellbeingNotification(report, () => {
-      setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
-      navigateTo('resident', 'companion');
+  /**
+   * Direct Automated Escalation to Physical Consultation when High 3-Day Drift occurs
+   */
+  const handleDirectClinicalConsultation = () => {
+    const who5: Who5Responses = {
+      q1_cheerful: 2,
+      q2_calm: 2,
+      q3_active: 1,
+      q4_rested: 1,
+      q5_interested: 2,
+    };
+    const physicalContext: PhysicalContextResponses = {
+      sleepDisruption: adlReport.suggestedPhysicalContext.sleepDisruption || 3,
+      painOrTension: adlReport.suggestedPhysicalContext.painOrTension || 2,
+      fatigueOrRoleLimit: adlReport.suggestedPhysicalContext.fatigueOrRoleLimit || 3,
+    };
+    const result = evaluateBiopsychosocialTriage({
+      who5,
+      physicalContext,
+      history,
     });
-
-    setNotificationToast(
-      sentSystemNotif
-        ? `Sent to device notification tray: "${report.notificationBody}"`
-        : report.notificationBody
+    result.whatThisMeans.unshift(
+      `Automated Early Escalation: ${adlReport.contextualExplanation}`
     );
+    setLatestAssessment({ who5, physicalContext, result });
+    setResidentStage('results');
   };
 
   const navigateTo = (portal: ActivePortal, stage?: ResidentStage) => {
@@ -223,6 +233,8 @@ export default function MizanCareApp() {
   const handleCheckInComplete = async (payload: {
     who5: Who5Responses;
     physicalContext?: PhysicalContextResponses;
+    gad7?: Gad7Responses;
+    phq9?: Phq9Responses;
     result: ExplainableResult;
   }) => {
     setLatestAssessment(payload);
@@ -301,31 +313,39 @@ export default function MizanCareApp() {
     }
   };
 
+  const sleepFillPct = Math.min(100, Math.round((adlReport.recentSummary.sleepHours / 8) * 100));
+  const moveFillPct = Math.min(100, Math.round((adlReport.recentSummary.steps / 7000) * 100));
+  const recoveryFillPct =
+    adlReport.severity === 'notable_drift'
+      ? 45
+      : adlReport.severity === 'mild_drift'
+      ? 68
+      : 90;
+
   return (
     <div className="min-h-screen flex flex-col">
+      {/* Clean, Balanced Top Header */}
       <header className="bg-[#FFFEFB]/95 backdrop-blur-xs border-b border-stone-200/80 sticky top-0 z-40">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-4">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-3">
           <button
             type="button"
             onClick={() => navigateTo('resident', 'consent')}
-            className="flex items-center gap-3 text-left cursor-pointer"
+            className="flex items-center gap-2.5 text-left cursor-pointer shrink-0"
           >
             <div className="w-9 h-9 rounded-xl bg-teal-800 text-white flex items-center justify-center font-serif text-lg">
               م
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-serif font-medium text-stone-900 text-xl tracking-tight">
-                  Mizan Care
-                </span>
-                <span className="text-xs text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200/70">
-                  ميزان
-                </span>
-              </div>
+            <div className="flex items-center gap-2">
+              <span className="font-serif font-medium text-stone-900 text-xl tracking-tight">
+                Mizan Care
+              </span>
+              <span className="text-xs text-teal-800 bg-teal-50 px-2 py-0.5 rounded-full border border-teal-200/70">
+                ميزان
+              </span>
             </div>
           </button>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2 shrink-0">
             {(activePortal !== 'resident' || residentStage !== 'consent') && (
               <button
                 type="button"
@@ -336,15 +356,6 @@ export default function MizanCareApp() {
                 Home
               </button>
             )}
-
-            <button
-              type="button"
-              onClick={() => navigateTo('resident', 'companion')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-xs font-semibold text-teal-900 transition cursor-pointer"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-teal-700" />
-              Mizan Companion
-            </button>
 
             <button
               type="button"
@@ -373,7 +384,7 @@ export default function MizanCareApp() {
                 <HeartHandshake className="w-5 h-5 text-teal-800 mb-2" />
                 <div className="font-semibold text-sm text-stone-900">Mizan Companion</div>
                 <p className="text-xs text-stone-600 mt-0.5">
-                  Passive rhythm baseline, 3-question check-in &amp; micro-interventions.
+                  Daily rhythm check-in, appetite &amp; sleep reflection, and voice-guided relief.
                 </p>
               </button>
 
@@ -452,81 +463,194 @@ export default function MizanCareApp() {
         {activePortal === 'resident' && (
           <>
             {residentStage === 'consent' && (
-              <div className="space-y-5">
-                {!isNativeApp && (
-                  <div className="max-w-3xl mx-auto p-4 rounded-2xl bg-[#FFFEFB] border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="flex items-start gap-3">
-                      <div className="w-9 h-9 rounded-xl bg-teal-50 border border-teal-200 text-teal-800 flex items-center justify-center shrink-0 mt-0.5">
-                        <Watch className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-semibold text-stone-900">
-                          Phone &amp; Watch Early Mind–Body Detector ({adlReport.baselineStage})
-                        </div>
-                        <p className="text-[11px] text-stone-600 mt-0.5 leading-relaxed">
-                          Tracks personal sleep &amp; movement baselines on-device and invites a
-                          30-second Mizan Companion reflection when 3-day drift occurs.
-                        </p>
-                      </div>
-                    </div>
+              <div className="space-y-6">
+                {/* Visual Mind-Body Indicators Card (No Smartwatch Image — Pure Visual Indicators + Tiered Clinic Automation) */}
+                <div className="max-w-3xl mx-auto bg-[#FFFEFB] border border-stone-200 rounded-3xl shadow-xs p-5 sm:p-7 space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-4 border-b border-stone-100">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-teal-900 bg-teal-50 border border-teal-200 px-3 py-1 rounded-full">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      Today’s Mind–Body Balance Indicators
+                    </span>
 
-                    <div className="flex items-center gap-2.5 shrink-0">
-                      {browserSensorEnabled && (
-                        <button
-                          type="button"
-                          onClick={handleTriggerWellbeingNotification}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-[11px] font-semibold text-amber-950 cursor-pointer"
-                        >
-                          <BellRing className="w-3.5 h-3.5 text-amber-700" />
-                          Simulate 3-Day Drift
-                        </button>
-                      )}
-
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
-                        role="switch"
-                        aria-checked={browserSensorEnabled}
-                        onClick={handleToggleBrowserSensor}
-                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
-                          browserSensorEnabled ? 'bg-teal-800' : 'bg-stone-300'
+                        onClick={() => applyHomeScenario('steady')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
+                          adlReport.severity === 'stable'
+                            ? 'bg-teal-800 text-white border-teal-800'
+                            : 'bg-stone-50 text-stone-700 border-stone-200'
                         }`}
                       >
-                        <span
-                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
-                            browserSensorEnabled ? 'translate-x-5' : 'translate-x-0'
-                          }`}
-                        />
+                        Steady
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyHomeScenario('mild')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
+                          adlReport.severity === 'mild_drift'
+                            ? 'bg-amber-600 text-white border-amber-600'
+                            : 'bg-amber-50 text-amber-950 border-amber-200'
+                        }`}
+                      >
+                        Mild Shift
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyHomeScenario('high')}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border cursor-pointer ${
+                          adlReport.severity === 'notable_drift'
+                            ? 'bg-rose-700 text-white border-rose-700'
+                            : 'bg-rose-50 text-rose-950 border-rose-200'
+                        }`}
+                      >
+                        High Shift
                       </button>
                     </div>
                   </div>
-                )}
 
-                {(notificationToast || (browserSensorEnabled && adlReport?.driftDetected)) && (
-                  <div className="max-w-3xl mx-auto p-4 rounded-2xl bg-stone-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
-                    <div className="flex items-start gap-3">
-                      <BellRing className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                      <div className="space-y-1">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
-                          Early Mind–Body Drift Alert
-                        </div>
-                        <p className="text-xs text-stone-100 leading-relaxed">
-                          {notificationToast || adlReport?.notificationBody}
-                        </p>
+                  <div className="space-y-2">
+                    <h2 className="font-serif text-xl sm:text-2xl text-stone-900 leading-snug">
+                      {adlReport.headlineEn}
+                    </h2>
+                    <p className="text-xs text-stone-600 leading-relaxed">
+                      Continuous everyday indicators help spot early strain before it builds up, guiding
+                      mild changes to a 3-question check-in, and high shifts directly to a physical
+                      consultation.
+                    </p>
+                  </div>
+
+                  {/* 3 Visual Indicator Bars */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                    <div className="p-4 rounded-2xl bg-stone-50/80 border border-stone-200/80 space-y-2.5">
+                      <div className="flex items-center justify-between text-xs font-semibold text-stone-700">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Moon className="w-3.5 h-3.5 text-teal-700" /> Sleep &amp; Rest
+                        </span>
+                        <span className="text-stone-900 font-bold">
+                          {adlReport.recentSummary.sleepHours}h
+                        </span>
+                      </div>
+                      <div className="h-2 w-full rounded-full bg-stone-200 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            adlReport.driftedDomains.includes('sleep')
+                              ? 'bg-amber-500'
+                              : 'bg-teal-600'
+                          }`}
+                          style={{ width: `${sleepFillPct}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-stone-500">
+                        Usual rhythm: {adlReport.baselineSummary.sleepHours}h
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
-                        setResidentStage('companion');
-                      }}
-                      className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold shrink-0 cursor-pointer"
-                    >
-                      Open Mizan Companion
-                    </button>
+                    <div className="p-4 rounded-2xl bg-stone-50/80 border border-stone-200/80 space-y-2.5">
+                      <div className="flex items-center justify-between text-xs font-semibold text-stone-700">
+                        <span className="inline-flex items-center gap-1.5">
+                          <Activity className="w-3.5 h-3.5 text-emerald-700" /> Daily Movement
+                        </span>
+                        <span className="text-stone-900 font-bold">
+                          {adlReport.recentSummary.steps.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className="h-2 w-full rounded-full bg-stone-200 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            adlReport.driftedDomains.includes('movement')
+                              ? 'bg-amber-500'
+                              : 'bg-emerald-600'
+                          }`}
+                          style={{ width: `${moveFillPct}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-stone-500">
+                        Usual: {adlReport.baselineSummary.steps.toLocaleString()} steps
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-stone-50/80 border border-stone-200/80 space-y-2.5">
+                      <div className="flex items-center justify-between text-xs font-semibold text-stone-700">
+                        <span className="inline-flex items-center gap-1.5">
+                          <HeartPulse className="w-3.5 h-3.5 text-sky-700" /> Body Recovery
+                        </span>
+                        <span className="text-stone-900 font-bold">
+                          {adlReport.severity === 'notable_drift'
+                            ? 'High Load'
+                            : adlReport.severity === 'mild_drift'
+                            ? 'Mild Load'
+                            : 'Calm'}
+                        </span>
+                      </div>
+                      <div className="h-2 w-full rounded-full bg-stone-200 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            adlReport.severity === 'notable_drift'
+                              ? 'bg-rose-600'
+                              : adlReport.severity === 'mild_drift'
+                              ? 'bg-amber-500'
+                              : 'bg-sky-600'
+                          }`}
+                          style={{ width: `${recoveryFillPct}%` }}
+                        />
+                      </div>
+                      <div className="text-[11px] text-stone-500">
+                        Resting pulse: {adlReport.recentSummary.restingHr} bpm
+                      </div>
+                    </div>
                   </div>
-                )}
+
+                  {/* Tiered Automated Action Banner (Mild Shift -> 3-Question Check | High Shift -> Direct Physical Consultation) */}
+                  {adlReport.severity === 'mild_drift' && (
+                    <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="text-xs text-amber-950 leading-relaxed">
+                        <strong>Mild Shift Detected:</strong> Your sleep and movement dipped
+                        slightly. A brief 3-question check-in helps see how you are feeling.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
+                          setResidentStage('companion');
+                        }}
+                        className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-teal-800 hover:bg-teal-900 text-white text-xs font-semibold shrink-0 cursor-pointer"
+                      >
+                        Take 3-Question Check <ArrowRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {adlReport.severity === 'notable_drift' && (
+                    <div className="p-4 rounded-2xl bg-rose-950 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="text-xs text-rose-100 leading-relaxed">
+                        <strong className="text-white">High 3-Day Shift Detected:</strong> All 3
+                        mind–body indicators shifted together. We recommend connecting directly with
+                        a licensed physical consultant.
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={handleDirectClinicalConsultation}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-stone-100 text-stone-900 text-xs font-bold cursor-pointer"
+                        >
+                          <Stethoscope className="w-3.5 h-3.5 text-teal-800" />
+                          Book Physical Consultation
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
+                            setResidentStage('companion');
+                          }}
+                          className="px-3 py-2 rounded-xl bg-rose-900 hover:bg-rose-800 border border-rose-700 text-xs font-medium text-rose-100 cursor-pointer"
+                        >
+                          3-Question Check First
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
                 <ConsentGate
                   onProceed={handleConsentProceed}
@@ -559,6 +683,7 @@ export default function MizanCareApp() {
                 onReportUpdated={(updatedReport) => setAdlReport(updatedReport)}
                 history={history}
                 onCompleteAdaptiveCheckIn={(payload) => handleCheckInComplete(payload)}
+                onDirectConsult={handleDirectClinicalConsultation}
               />
             )}
 
@@ -567,8 +692,11 @@ export default function MizanCareApp() {
                 result={latestAssessment.result}
                 who5={latestAssessment.who5}
                 physicalContext={latestAssessment.physicalContext}
+                gad7={latestAssessment.gad7}
+                phq9={latestAssessment.phq9}
                 history={history}
                 onStartNewCheckIn={() => navigateTo('resident', 'companion')}
+                onReinterpretAssessment={(updatedPayload) => setLatestAssessment(updatedPayload)}
                 onHandoffCreated={(pin, key) => {
                   setActivePin(pin);
                   setActiveKey(key);

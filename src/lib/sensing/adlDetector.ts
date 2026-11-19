@@ -14,10 +14,12 @@ export type DriftedDomain = 'sleep' | 'movement' | 'autonomic';
 
 export interface AdaptiveQuestion {
   id: string;
-  domain: DriftedDomain | 'emotional' | 'safety';
-  prompt: string;
-  subtext: string;
-  options: { label: string; score: number }[];
+  domain: DriftedDomain | 'appetite' | 'emotional';
+  promptEn: string;
+  promptAr: string;
+  subtextEn: string;
+  subtextAr: string;
+  options: { labelEn: string; labelAr: string; score: number }[];
 }
 
 export interface AdlDriftReport {
@@ -25,7 +27,8 @@ export interface AdlDriftReport {
   severity: 'stable' | 'mild_drift' | 'notable_drift';
   baselineStage: 'Day-1 Self-Anchor' | '7-Day Rolling Baseline' | '14-Day Circadian Baseline';
   driftedDomains: DriftedDomain[];
-  headline: string;
+  headlineEn: string;
+  headlineAr: string;
   notificationTitle: string;
   notificationBody: string;
   findings: string[];
@@ -49,7 +52,7 @@ export interface AdlDriftReport {
   };
 }
 
-const ADL_STORAGE_KEY = 'mizan_adl_14day_baseline_v1';
+const ADL_STORAGE_KEY = 'mizan_adl_14day_baseline_v2';
 
 export function isNativeMobileRuntime(): boolean {
   if (typeof window === 'undefined') return false;
@@ -75,9 +78,9 @@ export function saveAdlHistory(records: DailyAdlSnapshot[]): void {
 }
 
 export function buildInstantAnchorDataset(
-  usualSleep = 7.0,
-  usualSteps = 6000,
-  usualHr = 68,
+  usualSleep = 7.2,
+  usualSteps = 6500,
+  usualHr = 66,
   anchorTimestamp?: number
 ): DailyAdlSnapshot[] {
   const days: DailyAdlSnapshot[] = [];
@@ -87,53 +90,83 @@ export function buildInstantAnchorDataset(
   for (let i = 6; i >= 0; i--) {
     days.push({
       date: new Date(now - i * 86400000).toISOString().slice(0, 10),
-      steps: Math.round(usualSteps + ((i % 3) - 1) * 350),
+      steps: Math.round(usualSteps + ((i % 3) - 1) * 300),
       sleepHours: Number((usualSleep + (i % 2 === 0 ? 0.2 : -0.1)).toFixed(1)),
       nightScreenPickups: 1,
-      sedentaryMinutes: 360,
+      sedentaryMinutes: 350,
       restingHr: usualHr,
-      hrvMs: 55,
+      hrvMs: 56,
     });
   }
   return days;
 }
 
-export async function readLiveBleHeartRate(): Promise<{ bpm: number; estimatedHrvMs: number } | null> {
-  if (typeof navigator === 'undefined' || !('bluetooth' in navigator)) {
-    return null;
-  }
-  try {
-    const nav = navigator as unknown as {
-      bluetooth: {
-        requestDevice: (opts: { filters: { services: number[] }[] }) => Promise<{
-          gatt?: {
-            connect: () => Promise<{
-              getPrimaryService: (id: number) => Promise<{
-                getCharacteristic: (id: number) => Promise<{
-                  readValue: () => Promise<DataView>;
-                }>;
-              }>;
-            }>;
-          };
-        }>;
-      };
-    };
-    const device = await nav.bluetooth.requestDevice({
-      filters: [{ services: [0x180d] }],
+/**
+ * Mild 3-Day Shift Dataset (2 domains shifted -> recommends brief 3-question check-in)
+ */
+export function buildMildDriftDataset(): DailyAdlSnapshot[] {
+  const days: DailyAdlSnapshot[] = [];
+  const now = typeof window !== 'undefined' ? Date.now() : Date.parse('2026-11-18T12:00:00Z');
+
+  for (let i = 9; i >= 3; i--) {
+    days.push({
+      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
+      steps: 6400,
+      sleepHours: 7.2,
+      nightScreenPickups: 1,
+      sedentaryMinutes: 350,
+      restingHr: 66,
+      hrvMs: 56,
     });
-    const server = await device.gatt?.connect();
-    if (!server) return null;
-    const service = await server.getPrimaryService(0x180d);
-    const char = await service.getCharacteristic(0x2a37);
-    const value = await char.readValue();
-    const flags = value.getUint8(0);
-    const is16Bit = (flags & 0x01) !== 0;
-    const bpm = is16Bit ? value.getUint16(1, true) : value.getUint8(1);
-    const estimatedHrvMs = Math.max(22, Math.round(115 - bpm * 0.85));
-    return { bpm, estimatedHrvMs };
-  } catch {
-    return null;
   }
+
+  for (let i = 2; i >= 0; i--) {
+    days.push({
+      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
+      steps: 4400,
+      sleepHours: 5.5,
+      nightScreenPickups: 4,
+      sedentaryMinutes: 460,
+      restingHr: 71,
+      hrvMs: 49,
+    });
+  }
+
+  return days;
+}
+
+/**
+ * High 3-Day Shift Dataset (all 3 domains shifted -> triggers direct clinical consultation pathway)
+ */
+export function buildSampleDriftDataset(): DailyAdlSnapshot[] {
+  const days: DailyAdlSnapshot[] = [];
+  const now = typeof window !== 'undefined' ? Date.now() : Date.parse('2026-11-18T12:00:00Z');
+
+  for (let i = 9; i >= 3; i--) {
+    days.push({
+      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
+      steps: 6400 + (i % 3) * 300,
+      sleepHours: 7.2,
+      nightScreenPickups: 1,
+      sedentaryMinutes: 350,
+      restingHr: 66,
+      hrvMs: 56,
+    });
+  }
+
+  for (let i = 2; i >= 0; i--) {
+    days.push({
+      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
+      steps: 2500 - i * 150,
+      sleepHours: 4.5,
+      nightScreenPickups: 6,
+      sedentaryMinutes: 540,
+      restingHr: 78,
+      hrvMs: 36,
+    });
+  }
+
+  return days;
 }
 
 export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftReport {
@@ -165,11 +198,11 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   const baseSedentary = avg(baselineDays.map((d) => d.sedentaryMinutes));
   const recentSedentary = avg(recentDays.map((d) => d.sedentaryMinutes));
 
-  const baseHr = Math.round(avg(baselineDays.map((d) => d.restingHr ?? 68)));
-  const recentHr = Math.round(avg(recentDays.map((d) => d.restingHr ?? 68)));
+  const baseHr = Math.round(avg(baselineDays.map((d) => d.restingHr ?? 66)));
+  const recentHr = Math.round(avg(recentDays.map((d) => d.restingHr ?? 66)));
 
-  const baseHrv = Math.round(avg(baselineDays.map((d) => d.hrvMs ?? 55)));
-  const recentHrv = Math.round(avg(recentDays.map((d) => d.hrvMs ?? 55)));
+  const baseHrv = Math.round(avg(baselineDays.map((d) => d.hrvMs ?? 56)));
+  const recentHrv = Math.round(avg(recentDays.map((d) => d.hrvMs ?? 56)));
   const hrvDropPct = baseHrv > 0 ? Math.round(((baseHrv - recentHrv) / baseHrv) * 100) : 0;
 
   const findings: string[] = [];
@@ -180,7 +213,7 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
     driftedDomains.push('sleep');
     sleepScore = sleepDelta <= -2.0 ? 3 : 2;
     findings.push(
-      `Sleep & rest shifted (${recentSleep.toFixed(1)}h avg vs your usual ${baseSleep.toFixed(1)}h)`
+      `Sleep dropped to ${recentSleep.toFixed(1)}h avg (usual ${baseSleep.toFixed(1)}h)`
     );
   }
 
@@ -189,7 +222,7 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
     driftedDomains.push('movement');
     fatigueScore = stepDropPct >= 40 ? 3 : 2;
     findings.push(
-      `Daily physical movement dipped by ${Math.max(stepDropPct, 25)}% (${Math.round(recentSteps).toLocaleString()} steps/day)`
+      `Daily movement dropped ${Math.max(stepDropPct, 25)}% (${Math.round(recentSteps).toLocaleString()} steps/day)`
     );
   }
 
@@ -197,9 +230,7 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   if (hrvDropPct >= 18 || recentHr >= baseHr + 8) {
     driftedDomains.push('autonomic');
     tensionScore = hrvDropPct >= 28 ? 3 : 2;
-    findings.push(
-      `Autonomic recovery shifted (HRV ${recentHrv}ms vs ${baseHrv}ms; resting HR ${recentHr} bpm)`
-    );
+    findings.push(`Body recovery strain elevated across the past 3 days`);
   }
 
   const baselineSummary = {
@@ -217,17 +248,25 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   };
 
   if (driftedDomains.length >= 2) {
+    const isHighShift = driftedDomains.length >= 3;
     const summarySentence = findings.join('; ');
     return {
       driftDetected: true,
-      severity: driftedDomains.length >= 3 ? 'notable_drift' : 'mild_drift',
+      severity: isHighShift ? 'notable_drift' : 'mild_drift',
       baselineStage,
       driftedDomains,
-      headline: 'Noticeable shift in your mind–body rhythm over the past 3 days',
-      notificationTitle: 'Mizan Companion · Gentle Mind–Body Check-In',
-      notificationBody: `Your recent rhythm shifted: ${summarySentence}. Tap for a 30-second reflection.`,
+      headlineEn: isHighShift
+        ? 'High 3-day shift across sleep, movement, and body recovery'
+        : 'Mild shift in your sleep and daily movement over the last 3 days',
+      headlineAr: isHighShift
+        ? 'تغيّر ملحوظ خلال 3 أيام في النوم والحركة وراحة الجسد'
+        : 'تغيّر طفيف في نومك ونشاطك اليومي خلال الأيام الثلاثة الماضية',
+      notificationTitle: 'Mizan Care · Daily Rhythm Check',
+      notificationBody: isHighShift
+        ? `Significant 3-day shift detected: ${summarySentence}. Direct clinician consultation is recommended.`
+        : `Mild shift detected: ${summarySentence}. A quick 3-question check-in is recommended.`,
       findings,
-      contextualExplanation: `Your recent sleep (${recentSummary.sleepHours}h vs ${baselineSummary.sleepHours}h) and daily rhythm have shifted compared with your usual pattern. These changes can reflect physical exhaustion, work stress, or recovery load—not a medical diagnosis.`,
+      contextualExplanation: `Over the past 3 days, your sleep (${recentSummary.sleepHours}h vs your usual ${baselineSummary.sleepHours}h) and daily energy rhythm have shifted. Stress and emotional overload often affect sleep, appetite, and physical energy first.`,
       baselineSummary,
       recentSummary,
       suggestedPhysicalContext: {
@@ -243,156 +282,90 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
     severity: 'stable',
     baselineStage,
     driftedDomains,
-    headline: 'Your physical and daily routine rhythm is steady',
-    notificationTitle: 'Mizan Companion · Mind–Body Rhythm',
-    notificationBody: 'Your movement, sleep, and recovery remain close to your personal baseline.',
+    headlineEn: 'Your daily sleep, movement, and body recovery look steady',
+    headlineAr: 'نومك ونشاطك اليومي وراحة جسدك تبدو مستقرة',
+    notificationTitle: 'Mizan Care · Daily Rhythm',
+    notificationBody: 'Your movement and sleep remain close to your usual routine.',
     findings,
-    contextualExplanation: `Your recent sleep (${recentSummary.sleepHours}h) and movement (${recentSummary.steps.toLocaleString()} steps/day) align closely with your personal baseline.`,
+    contextualExplanation: `Your recent sleep (${recentSummary.sleepHours}h) and daily movement (${recentSummary.steps.toLocaleString()} steps/day) match your usual rhythm.`,
     baselineSummary,
     recentSummary,
     suggestedPhysicalContext: { sleepDisruption: 0, painOrTension: 0, fatigueOrRoleLimit: 0 },
   };
 }
 
+/**
+ * Guaranteed 3-Question Generator: Always returns exactly 3 distinct questions.
+ */
 export function generateAdaptiveQuestions(report: AdlDriftReport): AdaptiveQuestion[] {
-  const questions: AdaptiveQuestion[] = [];
-
-  if (report.driftedDomains.includes('sleep')) {
-    questions.push({
-      id: 'q-sleep',
-      domain: 'sleep',
-      prompt: `Your sleep averaged ${report.recentSummary.sleepHours}h over the last 3 days (down from ${report.baselineSummary.sleepHours}h). How rested have you felt upon waking?`,
-      subtext: 'Connecting sleep duration with subjective recovery',
-      options: [
-        { label: 'Still feeling fairly refreshed', score: 0 },
-        { label: 'Slightly sluggish in the morning', score: 1 },
-        { label: 'Waking up tired or heavy', score: 2 },
-        { label: 'Exhausted even after resting', score: 3 },
-      ],
-    });
-  }
-
-  if (report.driftedDomains.includes('movement')) {
-    questions.push({
-      id: 'q-movement',
-      domain: 'movement',
-      prompt: `Your daily movement dipped to ${report.recentSummary.steps.toLocaleString()} steps/day. Has low energy or physical fatigue made daily tasks harder?`,
-      subtext: 'Evaluating functional energy & daily activity load',
-      options: [
-        { label: 'No, energy feels steady', score: 0 },
-        { label: 'A little slower than usual', score: 1 },
-        { label: 'Noticeably drained during tasks', score: 2 },
-        { label: 'Struggling to get through the day', score: 3 },
-      ],
-    });
-  }
-
-  if (report.driftedDomains.includes('autonomic')) {
-    questions.push({
-      id: 'q-autonomic',
-      domain: 'autonomic',
-      prompt: `Your wearable recovery markers shifted (HRV ${report.recentSummary.hrvMs}ms). Have you noticed physical tension, tightness, or mental restlessness?`,
-      subtext: 'Linking autonomic stress load with somatic tension',
-      options: [
-        { label: 'Body feels relaxed and calm', score: 0 },
-        { label: 'Mild neck/shoulder tightness', score: 1 },
-        { label: 'Frequently tense or on edge', score: 2 },
-        { label: 'Constant physical tension or racing thoughts', score: 3 },
-      ],
-    });
-  }
-
-  if (questions.length < 3) {
-    questions.push({
-      id: 'q-emotional',
-      domain: 'emotional',
-      prompt:
-        'Over the past few days, how often have you felt calm, in good spirits, and able to handle daily pressures?',
-      subtext: 'Core WHO-5 emotional wellbeing anchor',
-      options: [
-        { label: 'Most or all of the time', score: 0 },
-        { label: 'More than half the time', score: 1 },
-        { label: 'Less than half the time', score: 2 },
-        { label: 'Rarely or not at all', score: 3 },
-      ],
-    });
-  }
-
-  if (questions.length < 3) {
-    questions.push({
-      id: 'q-overwhelm',
-      domain: 'emotional',
-      prompt: 'When you pause right now, how heavy or overwhelming does your current stress feel?',
-      subtext: 'Helps Mizan Companion choose the right support intensity',
-      options: [
-        { label: 'Manageable — just checking in', score: 0 },
-        { label: 'A bit stressed, could use a reset', score: 1 },
-        { label: 'Heavy — affecting sleep or focus', score: 2 },
-        { label: 'Overwhelming — I want human support', score: 3 },
-      ],
-    });
-  }
-
-  return questions.slice(0, 3);
-}
-
-export async function dispatchSystemWellbeingNotification(
-  report: AdlDriftReport,
-  onNotificationTap?: () => void
-): Promise<boolean> {
-  if (typeof window === 'undefined' || !('Notification' in window)) {
-    return false;
-  }
-
-  if (Notification.permission === 'default') {
-    await Notification.requestPermission();
-  }
-
-  if (Notification.permission !== 'granted') {
-    return false;
-  }
-
-  const notif = new Notification(report.notificationTitle, {
-    body: report.notificationBody,
-    tag: 'mizan-mind-body-drift',
-  });
-
-  notif.onclick = () => {
-    window.focus();
-    notif.close();
-    onNotificationTap?.();
+  const q1: AdaptiveQuestion = {
+    id: 'q-sleep',
+    domain: 'sleep',
+    promptEn: report.driftedDomains.includes('sleep')
+      ? `Your sleep averaged ${report.recentSummary.sleepHours} hours lately (down from ${report.baselineSummary.sleepHours} hours). How rested do you feel when you wake up?`
+      : `Your sleep has stayed around ${report.recentSummary.sleepHours} hours. Have you been waking up feeling refreshed and ready for your day?`,
+    promptAr: report.driftedDomains.includes('sleep')
+      ? `بلغ متوسط نومك ${report.recentSummary.sleepHours} ساعات مؤخراً (أقل من معتادك ${report.baselineSummary.sleepHours} ساعات). ما مدى شعورك بالراحة عند الاستيقاظ؟`
+      : `استقر نومك حول ${report.recentSummary.sleepHours} ساعات. هل تستيقظ وأنت تشعر بالانتعاش والاستعداد ليومك؟`,
+    subtextEn: '1 of 3 · Rest & Recovery',
+    subtextAr: '1 من 3 · النوم والراحة',
+    options: [
+      { labelEn: 'Feeling refreshed and rested', labelAr: 'أشعر بالانتعاش والراحة', score: 0 },
+      { labelEn: 'A little tired in the morning', labelAr: 'تعب خفيف في الصباح', score: 1 },
+      { labelEn: 'Waking up heavy or unrefreshed', labelAr: 'أستيقظ مثقلاً دون راحة كافية', score: 2 },
+      { labelEn: 'Exhausted even after resting', labelAr: 'إرهاق شديد حتى بعد الراحة', score: 3 },
+    ],
   };
 
-  return true;
-}
+  const q2: AdaptiveQuestion = {
+    id: 'q-appetite',
+    domain: 'appetite',
+    promptEn:
+      'How has your appetite been lately—for example, feeling hungry but finding it hard to eat, skipping meals, or feeling stomach tightness?',
+    promptAr:
+      'كيف كانت شهيتك للطعام مؤخراً — مثل الشعور بالجوع مع صعوبة في الأكل، أو تفويت الوجبات، أو انقباض المعدة؟',
+    subtextEn: '2 of 3 · Appetite & Body Signals',
+    subtextAr: '2 من 3 · الشهية وإشارات الجسد',
+    options: [
+      { labelEn: 'Eating normally as usual', labelAr: 'آكل بشكل طبيعي كالمعتاد', score: 0 },
+      { labelEn: 'Slightly less appetite than usual', labelAr: 'شهيتي أقل قليلاً من المعتاد', score: 1 },
+      {
+        labelEn: 'Hungry, but struggling to eat or finishing very little',
+        labelAr: 'أشعر بالجوع لكن أجد صعوبة في الأكل',
+        score: 2,
+      },
+      {
+        labelEn: 'Barely able to eat or strong stomach tightness',
+        labelAr: 'بالكاد أستطيع الأكل أو أشعر بضيق شديد في المعدة',
+        score: 3,
+      },
+    ],
+  };
 
-export function buildSampleDriftDataset(): DailyAdlSnapshot[] {
-  const days: DailyAdlSnapshot[] = [];
-  const now = Date.now();
+  const q3: AdaptiveQuestion = {
+    id: 'q-energy-calm',
+    domain: 'movement',
+    promptEn:
+      'Have low energy, body tension, or a heavy mood made it harder to get through your normal daily routine?',
+    promptAr:
+      'هل جعل انخفاض الطاقة أو شد الجسد أو ثقل المزاج إكمال روتينك اليومي أصعب من المعتاد؟',
+    subtextEn: '3 of 3 · Daily Energy & Emotional Balance',
+    subtextAr: '3 من 3 · الطاقة اليومية والتوازن النفسي',
+    options: [
+      { labelEn: 'No, my energy and mood feel steady', labelAr: 'لا، طاقتي ومزاجي مستقران', score: 0 },
+      { labelEn: 'Moving a bit slower than usual', labelAr: 'أتحرك ببطء أكثر قليلاً من المعتاد', score: 1 },
+      {
+        labelEn: 'Noticeably drained, tense, or overwhelmed',
+        labelAr: 'أشعر باستنزاف أو شد أو ضغط واضح',
+        score: 2,
+      },
+      {
+        labelEn: 'Struggling to get through everyday tasks',
+        labelAr: 'أجد صعوبة كبيرة في إنجاز مهامي اليومية',
+        score: 3,
+      },
+    ],
+  };
 
-  for (let i = 9; i >= 3; i--) {
-    days.push({
-      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
-      steps: 6100 + (i % 3) * 350,
-      sleepHours: 7.1,
-      nightScreenPickups: 1,
-      sedentaryMinutes: 350,
-      restingHr: 68,
-      hrvMs: 56,
-    });
-  }
-
-  for (let i = 2; i >= 0; i--) {
-    days.push({
-      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
-      steps: 2600 - i * 150,
-      sleepHours: 4.6,
-      nightScreenPickups: 6,
-      sedentaryMinutes: 530,
-      restingHr: 76,
-      hrvMs: 37,
-    });
-  }
-
-  return days;
+  return [q1, q2, q3];
 }
