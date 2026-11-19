@@ -2,15 +2,13 @@
 
 import React, { useEffect, useState } from 'react';
 import ConsentGate, { ConsentPreferences } from '@/components/ConsentGate';
-import CheckInFlow from '@/components/CheckInFlow';
+import MizanCompanion from '@/components/MizanCompanion';
 import ResultsAndHandoff from '@/components/ResultsAndHandoff';
 import ClinicianPortal from '@/components/ClinicianPortal';
 import PublicHealthMonitor from '@/components/PublicHealthMonitor';
 import {
   Who5Responses,
   PhysicalContextResponses,
-  Gad7Responses,
-  Phq9Responses,
   ExplainableResult,
   HistoricalRecord,
 } from '@/lib/clinical/triage';
@@ -29,6 +27,7 @@ import {
   evaluateMindBodyAdlDrift,
   dispatchSystemWellbeingNotification,
   buildSampleDriftDataset,
+  buildInstantAnchorDataset,
 } from '@/lib/sensing/adlDetector';
 import {
   Shield,
@@ -48,10 +47,11 @@ import {
   CheckCircle2,
   BellRing,
   Watch,
+  Sparkles,
 } from 'lucide-react';
 
 type ActivePortal = 'resident' | 'booking_status' | 'support' | 'clinician' | 'monitor';
-type ResidentStage = 'consent' | 'checkin' | 'results';
+type ResidentStage = 'consent' | 'companion' | 'results';
 
 export default function MizanCareApp() {
   const [activePortal, setActivePortal] = useState<ActivePortal>('resident');
@@ -67,17 +67,16 @@ export default function MizanCareApp() {
   const [history, setHistory] = useState<HistoricalRecord[]>([]);
   const [hasVaultData, setHasVaultData] = useState(false);
 
-  // Passive Phone + Watch ADL Detector State
   const [isNativeApp, setIsNativeApp] = useState(false);
-  const [browserSensorEnabled, setBrowserSensorEnabled] = useState(false);
-  const [adlReport, setAdlReport] = useState<AdlDriftReport | null>(null);
+  const [browserSensorEnabled, setBrowserSensorEnabled] = useState(true);
+  const [adlReport, setAdlReport] = useState<AdlDriftReport>(() =>
+    evaluateMindBodyAdlDrift(buildInstantAnchorDataset())
+  );
   const [notificationToast, setNotificationToast] = useState<string | null>(null);
 
   const [latestAssessment, setLatestAssessment] = useState<{
     who5: Who5Responses;
     physicalContext?: PhysicalContextResponses;
-    gad7?: Gad7Responses;
-    phq9?: Phq9Responses;
     result: ExplainableResult;
   } | null>(null);
 
@@ -103,13 +102,13 @@ export default function MizanCareApp() {
     const native = isNativeMobileRuntime();
     setIsNativeApp(native);
 
-    const savedBrowserToggle = window.localStorage.getItem('mizan_browser_sensor_on') === 'true';
-    if (native || savedBrowserToggle) {
-      setBrowserSensorEnabled(true);
-      const existing = loadAdlHistory();
-      if (existing.length > 0) {
-        setAdlReport(evaluateMindBodyAdlDrift(existing));
-      }
+    const existing = loadAdlHistory();
+    if (existing.length > 0) {
+      setAdlReport(evaluateMindBodyAdlDrift(existing));
+    } else {
+      const initialAnchor = buildInstantAnchorDataset();
+      saveAdlHistory(initialAnchor);
+      setAdlReport(evaluateMindBodyAdlDrift(initialAnchor));
     }
 
     const savedPin = window.localStorage.getItem('mizan_active_pin') || '';
@@ -122,7 +121,8 @@ export default function MizanCareApp() {
       setActiveKey(savedKey);
       setManualKeyInput(savedKey);
     }
-  }, []); 
+  }, []);
+
   useEffect(() => {
     (async () => {
       const exists = await hasLocalRecords();
@@ -141,6 +141,7 @@ export default function MizanCareApp() {
       }
     })();
   }, []);
+
   useEffect(() => {
     if (!browserSensorEnabled || typeof window === 'undefined') return;
 
@@ -178,21 +179,11 @@ export default function MizanCareApp() {
     setBrowserSensorEnabled(next);
     window.localStorage.setItem('mizan_browser_sensor_on', String(next));
 
-    if (next) {
-      if ('Notification' in window && Notification.permission === 'default') {
-        await Notification.requestPermission();
-      }
-      const existing = loadAdlHistory();
-      if (existing.length > 0) {
-        setAdlReport(evaluateMindBodyAdlDrift(existing));
-      }
-    } else {
-      setAdlReport(null);
-      setNotificationToast(null);
+    if (next && 'Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission();
     }
   };
 
-  // Triggers a real Phone / Smartwatch System Notification reporting what is happening
   const handleTriggerWellbeingNotification = async () => {
     const sample = buildSampleDriftDataset();
     saveAdlHistory(sample);
@@ -201,7 +192,7 @@ export default function MizanCareApp() {
 
     const sentSystemNotif = await dispatchSystemWellbeingNotification(report, () => {
       setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
-      navigateTo('resident', 'checkin');
+      navigateTo('resident', 'companion');
     });
 
     setNotificationToast(
@@ -219,7 +210,7 @@ export default function MizanCareApp() {
 
   const handleConsentProceed = (prefs: ConsentPreferences) => {
     setConsentPrefs(prefs);
-    setResidentStage('checkin');
+    setResidentStage('companion');
   };
 
   const handleWipeVault = async () => {
@@ -232,8 +223,6 @@ export default function MizanCareApp() {
   const handleCheckInComplete = async (payload: {
     who5: Who5Responses;
     physicalContext?: PhysicalContextResponses;
-    gad7?: Gad7Responses;
-    phq9?: Phq9Responses;
     result: ExplainableResult;
   }) => {
     setLatestAssessment(payload);
@@ -248,12 +237,12 @@ export default function MizanCareApp() {
 
     if (consentPrefs.localDeviceStorage) {
       await saveEncryptedAssessment(
-  JSON.stringify({
-    id: crypto.randomUUID(),
-    timestamp: nowIso,
-    ...payload,
-  })
-);
+        JSON.stringify({
+          id: crypto.randomUUID(),
+          timestamp: nowIso,
+          ...payload,
+        })
+      );
       setHasVaultData(true);
       setHistory((prev) => [...prev, newEntry]);
     }
@@ -314,7 +303,6 @@ export default function MizanCareApp() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Top Header with Home & Navigation Menu */}
       <header className="bg-[#FFFEFB]/95 backdrop-blur-xs border-b border-stone-200/80 sticky top-0 z-40">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-3.5 flex items-center justify-between gap-4">
           <button
@@ -351,6 +339,15 @@ export default function MizanCareApp() {
 
             <button
               type="button"
+              onClick={() => navigateTo('resident', 'companion')}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-teal-50 hover:bg-teal-100 border border-teal-200 text-xs font-semibold text-teal-900 transition cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+              Mizan Companion
+            </button>
+
+            <button
+              type="button"
               onClick={() => setMenuOpen((prev) => !prev)}
               aria-expanded={menuOpen}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold transition cursor-pointer"
@@ -361,13 +358,12 @@ export default function MizanCareApp() {
           </div>
         </div>
 
-        {/* Navigation Menu Drawer */}
         {menuOpen && (
           <div className="border-t border-stone-200 bg-[#FFFEFB] shadow-lg">
             <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
               <button
                 type="button"
-                onClick={() => navigateTo('resident', 'consent')}
+                onClick={() => navigateTo('resident', 'companion')}
                 className={`p-4 rounded-2xl border text-left transition cursor-pointer ${
                   activePortal === 'resident'
                     ? 'bg-teal-50/80 border-teal-700'
@@ -375,9 +371,9 @@ export default function MizanCareApp() {
                 }`}
               >
                 <HeartHandshake className="w-5 h-5 text-teal-800 mb-2" />
-                <div className="font-semibold text-sm text-stone-900">Self-Reflection</div>
+                <div className="font-semibold text-sm text-stone-900">Mizan Companion</div>
                 <p className="text-xs text-stone-600 mt-0.5">
-                  Start a private check-in or view your care options.
+                  Passive rhythm baseline, 3-question check-in &amp; micro-interventions.
                 </p>
               </button>
 
@@ -412,7 +408,7 @@ export default function MizanCareApp() {
                 <MessageSquareHeart className="w-5 h-5 text-amber-700 mb-2" />
                 <div className="font-semibold text-sm text-stone-900">Customer Care</div>
                 <p className="text-xs text-stone-600 mt-0.5">
-                  24/7 UAE helplines, emergency numbers &amp; navigation desk.
+                  24/7 UAE helplines (800-SAKINA, 800-HOPE) &amp; emergency numbers.
                 </p>
               </button>
 
@@ -452,13 +448,11 @@ export default function MizanCareApp() {
         )}
       </header>
 
-      {/* Main Content */}
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-8 md:py-10">
         {activePortal === 'resident' && (
           <>
             {residentStage === 'consent' && (
               <div className="space-y-5">
-                {/* Browser-Only Sensor Activation Toggle (Hidden automatically on Native Phone/Watch apps) */}
                 {!isNativeApp && (
                   <div className="max-w-3xl mx-auto p-4 rounded-2xl bg-[#FFFEFB] border border-stone-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div className="flex items-start gap-3">
@@ -467,11 +461,11 @@ export default function MizanCareApp() {
                       </div>
                       <div>
                         <div className="text-xs font-semibold text-stone-900">
-                          Phone &amp; Watch Early Mind–Body Detector (Browser Permission)
+                          Phone &amp; Watch Early Mind–Body Detector ({adlReport.baselineStage})
                         </div>
                         <p className="text-[11px] text-stone-600 mt-0.5 leading-relaxed">
-                          Allow browser notifications so Mizan Care can report subtle sleep or
-                          movement changes directly in your phone/watch notification tray.
+                          Tracks personal sleep &amp; movement baselines on-device and invites a
+                          30-second Mizan Companion reflection when 3-day drift occurs.
                         </p>
                       </div>
                     </div>
@@ -484,7 +478,7 @@ export default function MizanCareApp() {
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-[11px] font-semibold text-amber-950 cursor-pointer"
                         >
                           <BellRing className="w-3.5 h-3.5 text-amber-700" />
-                          Send Watch/Phone Notice
+                          Simulate 3-Day Drift
                         </button>
                       )}
 
@@ -507,14 +501,13 @@ export default function MizanCareApp() {
                   </div>
                 )}
 
-                {/* Notification Preview Banner (Mirrors what appears on the Phone / Watch Notification) */}
                 {(notificationToast || (browserSensorEnabled && adlReport?.driftDetected)) && (
                   <div className="max-w-3xl mx-auto p-4 rounded-2xl bg-stone-900 text-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
                     <div className="flex items-start gap-3">
                       <BellRing className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                       <div className="space-y-1">
                         <div className="text-[11px] font-bold uppercase tracking-wider text-amber-300">
-                          Phone / Smartwatch Notification Report
+                          Early Mind–Body Drift Alert
                         </div>
                         <p className="text-xs text-stone-100 leading-relaxed">
                           {notificationToast || adlReport?.notificationBody}
@@ -526,11 +519,11 @@ export default function MizanCareApp() {
                       type="button"
                       onClick={() => {
                         setConsentPrefs((p) => ({ ...p, physicalContextIncluded: true }));
-                        setResidentStage('checkin');
+                        setResidentStage('companion');
                       }}
                       className="px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold shrink-0 cursor-pointer"
                     >
-                      Start 60s Check-In
+                      Open Mizan Companion
                     </button>
                   </div>
                 )}
@@ -560,12 +553,12 @@ export default function MizanCareApp() {
               </div>
             )}
 
-            {residentStage === 'checkin' && (
-              <CheckInFlow
-                includePhysicalContext={consentPrefs.physicalContextIncluded}
+            {residentStage === 'companion' && (
+              <MizanCompanion
+                adlReport={adlReport}
+                onReportUpdated={(updatedReport) => setAdlReport(updatedReport)}
                 history={history}
-                onComplete={handleCheckInComplete}
-                onBack={() => navigateTo('resident', 'consent')}
+                onCompleteAdaptiveCheckIn={(payload) => handleCheckInComplete(payload)}
               />
             )}
 
@@ -574,10 +567,8 @@ export default function MizanCareApp() {
                 result={latestAssessment.result}
                 who5={latestAssessment.who5}
                 physicalContext={latestAssessment.physicalContext}
-                gad7={latestAssessment.gad7}
-                phq9={latestAssessment.phq9}
                 history={history}
-                onStartNewCheckIn={() => navigateTo('resident', 'consent')}
+                onStartNewCheckIn={() => navigateTo('resident', 'companion')}
                 onHandoffCreated={(pin, key) => {
                   setActivePin(pin);
                   setActiveKey(key);
@@ -591,7 +582,6 @@ export default function MizanCareApp() {
           </>
         )}
 
-        {/* Dedicated Resident Booking, Clinician Reply & Key-Release Page */}
         {activePortal === 'booking_status' && (
           <div className="max-w-2xl mx-auto bg-[#FFFEFB] border border-stone-200 rounded-3xl shadow-xs p-6 md:p-10 space-y-6">
             <div>
@@ -691,7 +681,6 @@ export default function MizanCareApp() {
                   </div>
                 )}
 
-                {/* Resident In-Website Clinical Key Release Control */}
                 <div className="p-4 rounded-xl bg-stone-900 text-white space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
                     <span className="text-xs font-semibold text-teal-300 flex items-center gap-1.5">
@@ -750,7 +739,6 @@ export default function MizanCareApp() {
           </div>
         )}
 
-        {/* Customer Care & 24/7 Support Hub */}
         {activePortal === 'support' && (
           <div className="max-w-3xl mx-auto bg-[#FFFEFB] border border-stone-200 rounded-3xl shadow-xs p-6 md:p-10 space-y-6">
             <div>
@@ -768,7 +756,7 @@ export default function MizanCareApp() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="p-5 rounded-2xl bg-rose-50/70 border border-rose-200 space-y-2">
+              <div className="p-5 rounded-2xl bg-rose-50/70 border border-rose-200 space-y-2.5">
                 <div className="font-semibold text-rose-950 text-sm flex items-center gap-2">
                   <PhoneCall className="w-4 h-4 text-rose-700" />
                   24/7 Urgent &amp; Crisis Helplines (UAE)
@@ -778,16 +766,28 @@ export default function MizanCareApp() {
                 </p>
                 <div className="flex flex-wrap gap-2 pt-1">
                   <a
-                    href="tel:8004673"
+                    href="tel:800725462"
                     className="px-3.5 py-2 rounded-xl bg-teal-800 text-white text-xs font-semibold"
                   >
-                    Call 800-4673 (HOPE)
+                    800-SAKINA (800-725462)
+                  </a>
+                  <a
+                    href="tel:8004673"
+                    className="px-3.5 py-2 rounded-xl bg-teal-700 text-white text-xs font-semibold"
+                  >
+                    800-HOPE (800-4673)
+                  </a>
+                  <a
+                    href="tel:998"
+                    className="px-3.5 py-2 rounded-xl bg-rose-700 text-white text-xs font-semibold"
+                  >
+                    Ambulance 998
                   </a>
                   <a
                     href="tel:999"
-                    className="px-3.5 py-2 rounded-xl bg-rose-700 text-white text-xs font-semibold"
+                    className="px-3.5 py-2 rounded-xl bg-rose-800 text-white text-xs font-semibold"
                   >
-                    Emergency 999
+                    Police 999
                   </a>
                 </div>
               </div>
@@ -810,10 +810,10 @@ export default function MizanCareApp() {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => navigateTo('resident', 'consent')}
+                onClick={() => navigateTo('resident', 'companion')}
                 className="px-6 py-3 rounded-2xl bg-teal-800 hover:bg-teal-900 text-white text-xs font-semibold transition cursor-pointer"
               >
-                Start a Self-Reflection Check-In
+                Open Mizan Companion
               </button>
             </div>
           </div>
@@ -834,7 +834,6 @@ export default function MizanCareApp() {
         )}
       </main>
 
-      {/* Footer */}
       <footer className="bg-[#FFFEFB] border-t border-stone-200/80 mt-12">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 py-5 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-stone-500">
           <div className="flex items-center gap-2">

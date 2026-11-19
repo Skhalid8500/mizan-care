@@ -6,17 +6,42 @@ export interface DailyAdlSnapshot {
   sleepHours: number;
   nightScreenPickups: number;
   sedentaryMinutes: number;
-  restingHr?: number; // Populated automatically when paired with a smartwatch
-  hrvMs?: number;     // Populated automatically when paired with a smartwatch
+  restingHr?: number;
+  hrvMs?: number;
+}
+
+export type DriftedDomain = 'sleep' | 'movement' | 'autonomic';
+
+export interface AdaptiveQuestion {
+  id: string;
+  domain: DriftedDomain | 'emotional' | 'safety';
+  prompt: string;
+  subtext: string;
+  options: { label: string; score: number }[];
 }
 
 export interface AdlDriftReport {
   driftDetected: boolean;
   severity: 'stable' | 'mild_drift' | 'notable_drift';
+  baselineStage: 'Day-1 Self-Anchor' | '7-Day Rolling Baseline' | '14-Day Circadian Baseline';
+  driftedDomains: DriftedDomain[];
   headline: string;
   notificationTitle: string;
   notificationBody: string;
   findings: string[];
+  contextualExplanation: string;
+  baselineSummary: {
+    sleepHours: number;
+    steps: number;
+    restingHr: number;
+    hrvMs: number;
+  };
+  recentSummary: {
+    sleepHours: number;
+    steps: number;
+    restingHr: number;
+    hrvMs: number;
+  };
   suggestedPhysicalContext: {
     sleepDisruption: number;
     painOrTension: number;
@@ -49,25 +74,80 @@ export function saveAdlHistory(records: DailyAdlSnapshot[]): void {
   window.localStorage.setItem(ADL_STORAGE_KEY, JSON.stringify(records.slice(-14)));
 }
 
-/**
- * Evaluates the last 3-4 days against the person's own 14-day physical & behavioral baseline.
- * Never diagnoses; generates a clear human summary for the phone/watch notification.
- */
-export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftReport {
-  if (records.length < 5) {
-    return {
-      driftDetected: false,
-      severity: 'stable',
-      headline: 'Learning your personal daily rhythm',
-      notificationTitle: 'Mizan Care · Mind–Body Rhythm',
-      notificationBody: 'Your daily movement and sleep baseline looks steady.',
-      findings: [],
-      suggestedPhysicalContext: { sleepDisruption: 0, painOrTension: 0, fatigueOrRoleLimit: 0 },
-    };
+export function buildInstantAnchorDataset(
+  usualSleep = 7.0,
+  usualSteps = 6000,
+  usualHr = 68,
+  anchorTimestamp?: number
+): DailyAdlSnapshot[] {
+  const days: DailyAdlSnapshot[] = [];
+  const now =
+    anchorTimestamp ??
+    (typeof window !== 'undefined' ? Date.now() : Date.parse('2026-11-18T12:00:00Z'));
+  for (let i = 6; i >= 0; i--) {
+    days.push({
+      date: new Date(now - i * 86400000).toISOString().slice(0, 10),
+      steps: Math.round(usualSteps + ((i % 3) - 1) * 350),
+      sleepHours: Number((usualSleep + (i % 2 === 0 ? 0.2 : -0.1)).toFixed(1)),
+      nightScreenPickups: 1,
+      sedentaryMinutes: 360,
+      restingHr: usualHr,
+      hrvMs: 55,
+    });
   }
+  return days;
+}
 
-  const baselineDays = records.slice(0, -3);
-  const recentDays = records.slice(-3);
+export async function readLiveBleHeartRate(): Promise<{ bpm: number; estimatedHrvMs: number } | null> {
+  if (typeof navigator === 'undefined' || !('bluetooth' in navigator)) {
+    return null;
+  }
+  try {
+    const nav = navigator as unknown as {
+      bluetooth: {
+        requestDevice: (opts: { filters: { services: number[] }[] }) => Promise<{
+          gatt?: {
+            connect: () => Promise<{
+              getPrimaryService: (id: number) => Promise<{
+                getCharacteristic: (id: number) => Promise<{
+                  readValue: () => Promise<DataView>;
+                }>;
+              }>;
+            }>;
+          };
+        }>;
+      };
+    };
+    const device = await nav.bluetooth.requestDevice({
+      filters: [{ services: [0x180d] }],
+    });
+    const server = await device.gatt?.connect();
+    if (!server) return null;
+    const service = await server.getPrimaryService(0x180d);
+    const char = await service.getCharacteristic(0x2a37);
+    const value = await char.readValue();
+    const flags = value.getUint8(0);
+    const is16Bit = (flags & 0x01) !== 0;
+    const bpm = is16Bit ? value.getUint16(1, true) : value.getUint8(1);
+    const estimatedHrvMs = Math.max(22, Math.round(115 - bpm * 0.85));
+    return { bpm, estimatedHrvMs };
+  } catch {
+    return null;
+  }
+}
+
+export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftReport {
+  const activeRecords = records.length >= 4 ? records : buildInstantAnchorDataset();
+
+  const baselineStage: AdlDriftReport['baselineStage'] =
+    records.length >= 12
+      ? '14-Day Circadian Baseline'
+      : records.length >= 6
+      ? '7-Day Rolling Baseline'
+      : 'Day-1 Self-Anchor';
+
+  const baselineDays = activeRecords.slice(0, -3);
+  const recentDays = activeRecords.slice(-3);
 
   const avg = (arr: number[]) => arr.reduce((a, b) => a + b, 0) / Math.max(arr.length, 1);
 
@@ -85,57 +165,71 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   const baseSedentary = avg(baselineDays.map((d) => d.sedentaryMinutes));
   const recentSedentary = avg(recentDays.map((d) => d.sedentaryMinutes));
 
-  const recentHrvDays = recentDays.filter((d) => typeof d.hrvMs === 'number');
-  const baseHrvDays = baselineDays.filter((d) => typeof d.hrvMs === 'number');
-  const hrvDropPct =
-    recentHrvDays.length > 0 && baseHrvDays.length > 0
-      ? Math.round(
-          ((avg(baseHrvDays.map((d) => d.hrvMs!)) - avg(recentHrvDays.map((d) => d.hrvMs!))) /
-            avg(baseHrvDays.map((d) => d.hrvMs!))) *
-            100
-        )
-      : 0;
+  const baseHr = Math.round(avg(baselineDays.map((d) => d.restingHr ?? 68)));
+  const recentHr = Math.round(avg(recentDays.map((d) => d.restingHr ?? 68)));
+
+  const baseHrv = Math.round(avg(baselineDays.map((d) => d.hrvMs ?? 55)));
+  const recentHrv = Math.round(avg(recentDays.map((d) => d.hrvMs ?? 55)));
+  const hrvDropPct = baseHrv > 0 ? Math.round(((baseHrv - recentHrv) / baseHrv) * 100) : 0;
 
   const findings: string[] = [];
-  let domainsShifted = 0;
+  const driftedDomains: DriftedDomain[] = [];
 
-  // 1. Sleep & Night Rest Domain
   let sleepScore = 0;
   if (sleepDelta <= -1.2 || recentPickups >= basePickups + 3) {
-    domainsShifted += 1;
+    driftedDomains.push('sleep');
     sleepScore = sleepDelta <= -2.0 ? 3 : 2;
     findings.push(
       `Sleep & rest shifted (${recentSleep.toFixed(1)}h avg vs your usual ${baseSleep.toFixed(1)}h)`
     );
   }
 
-  // 2. Physical Movement & Mobility Domain
   let fatigueScore = 0;
   if (stepDropPct >= 25 || recentSedentary >= baseSedentary + 90) {
-    domainsShifted += 1;
+    driftedDomains.push('movement');
     fatigueScore = stepDropPct >= 40 ? 3 : 2;
     findings.push(
       `Daily physical movement dipped by ${Math.max(stepDropPct, 25)}% (${Math.round(recentSteps).toLocaleString()} steps/day)`
     );
   }
 
-  // 3. Smartwatch Autonomic Stress / Tension Domain (HRV / Resting HR)
   let tensionScore = 0;
-  if (hrvDropPct >= 18) {
-    domainsShifted += 1;
+  if (hrvDropPct >= 18 || recentHr >= baseHr + 8) {
+    driftedDomains.push('autonomic');
     tensionScore = hrvDropPct >= 28 ? 3 : 2;
-    findings.push(`Smartwatch recovery (HRV) dropped ${hrvDropPct}% during rest`);
+    findings.push(
+      `Autonomic recovery shifted (HRV ${recentHrv}ms vs ${baseHrv}ms; resting HR ${recentHr} bpm)`
+    );
   }
 
-  if (domainsShifted >= 2) {
+  const baselineSummary = {
+    sleepHours: Number(baseSleep.toFixed(1)),
+    steps: Math.round(baseSteps),
+    restingHr: baseHr,
+    hrvMs: baseHrv,
+  };
+
+  const recentSummary = {
+    sleepHours: Number(recentSleep.toFixed(1)),
+    steps: Math.round(recentSteps),
+    restingHr: recentHr,
+    hrvMs: recentHrv,
+  };
+
+  if (driftedDomains.length >= 2) {
     const summarySentence = findings.join('; ');
     return {
       driftDetected: true,
-      severity: domainsShifted >= 3 ? 'notable_drift' : 'mild_drift',
-      headline: 'Noticeable shift in your physical & daily rhythm over the past 3 days',
-      notificationTitle: 'Mizan Care · Mind & Body Check-In',
-      notificationBody: `We noticed a change in your daily rhythm: ${summarySentence}. Tap to take a quiet 60-second check-in.`,
+      severity: driftedDomains.length >= 3 ? 'notable_drift' : 'mild_drift',
+      baselineStage,
+      driftedDomains,
+      headline: 'Noticeable shift in your mind–body rhythm over the past 3 days',
+      notificationTitle: 'Mizan Companion · Gentle Mind–Body Check-In',
+      notificationBody: `Your recent rhythm shifted: ${summarySentence}. Tap for a 30-second reflection.`,
       findings,
+      contextualExplanation: `Your recent sleep (${recentSummary.sleepHours}h vs ${baselineSummary.sleepHours}h) and daily rhythm have shifted compared with your usual pattern. These changes can reflect physical exhaustion, work stress, or recovery load—not a medical diagnosis.`,
+      baselineSummary,
+      recentSummary,
       suggestedPhysicalContext: {
         sleepDisruption: sleepScore,
         painOrTension: tensionScore,
@@ -147,18 +241,101 @@ export function evaluateMindBodyAdlDrift(records: DailyAdlSnapshot[]): AdlDriftR
   return {
     driftDetected: false,
     severity: 'stable',
+    baselineStage,
+    driftedDomains,
     headline: 'Your physical and daily routine rhythm is steady',
-    notificationTitle: 'Mizan Care · Mind & Body Rhythm',
-    notificationBody: 'Your movement and sleep patterns remain close to your personal baseline.',
+    notificationTitle: 'Mizan Companion · Mind–Body Rhythm',
+    notificationBody: 'Your movement, sleep, and recovery remain close to your personal baseline.',
     findings,
+    contextualExplanation: `Your recent sleep (${recentSummary.sleepHours}h) and movement (${recentSummary.steps.toLocaleString()} steps/day) align closely with your personal baseline.`,
+    baselineSummary,
+    recentSummary,
     suggestedPhysicalContext: { sleepDisruption: 0, painOrTension: 0, fatigueOrRoleLimit: 0 },
   };
 }
 
-/**
- * Dispatches a real system notification on phone, smartwatch (paired via OS notification mirroring),
- * or desktop browser so the user sees what is happening directly in the notification tray.
- */
+export function generateAdaptiveQuestions(report: AdlDriftReport): AdaptiveQuestion[] {
+  const questions: AdaptiveQuestion[] = [];
+
+  if (report.driftedDomains.includes('sleep')) {
+    questions.push({
+      id: 'q-sleep',
+      domain: 'sleep',
+      prompt: `Your sleep averaged ${report.recentSummary.sleepHours}h over the last 3 days (down from ${report.baselineSummary.sleepHours}h). How rested have you felt upon waking?`,
+      subtext: 'Connecting sleep duration with subjective recovery',
+      options: [
+        { label: 'Still feeling fairly refreshed', score: 0 },
+        { label: 'Slightly sluggish in the morning', score: 1 },
+        { label: 'Waking up tired or heavy', score: 2 },
+        { label: 'Exhausted even after resting', score: 3 },
+      ],
+    });
+  }
+
+  if (report.driftedDomains.includes('movement')) {
+    questions.push({
+      id: 'q-movement',
+      domain: 'movement',
+      prompt: `Your daily movement dipped to ${report.recentSummary.steps.toLocaleString()} steps/day. Has low energy or physical fatigue made daily tasks harder?`,
+      subtext: 'Evaluating functional energy & daily activity load',
+      options: [
+        { label: 'No, energy feels steady', score: 0 },
+        { label: 'A little slower than usual', score: 1 },
+        { label: 'Noticeably drained during tasks', score: 2 },
+        { label: 'Struggling to get through the day', score: 3 },
+      ],
+    });
+  }
+
+  if (report.driftedDomains.includes('autonomic')) {
+    questions.push({
+      id: 'q-autonomic',
+      domain: 'autonomic',
+      prompt: `Your wearable recovery markers shifted (HRV ${report.recentSummary.hrvMs}ms). Have you noticed physical tension, tightness, or mental restlessness?`,
+      subtext: 'Linking autonomic stress load with somatic tension',
+      options: [
+        { label: 'Body feels relaxed and calm', score: 0 },
+        { label: 'Mild neck/shoulder tightness', score: 1 },
+        { label: 'Frequently tense or on edge', score: 2 },
+        { label: 'Constant physical tension or racing thoughts', score: 3 },
+      ],
+    });
+  }
+
+  if (questions.length < 3) {
+    questions.push({
+      id: 'q-emotional',
+      domain: 'emotional',
+      prompt:
+        'Over the past few days, how often have you felt calm, in good spirits, and able to handle daily pressures?',
+      subtext: 'Core WHO-5 emotional wellbeing anchor',
+      options: [
+        { label: 'Most or all of the time', score: 0 },
+        { label: 'More than half the time', score: 1 },
+        { label: 'Less than half the time', score: 2 },
+        { label: 'Rarely or not at all', score: 3 },
+      ],
+    });
+  }
+
+  if (questions.length < 3) {
+    questions.push({
+      id: 'q-overwhelm',
+      domain: 'emotional',
+      prompt: 'When you pause right now, how heavy or overwhelming does your current stress feel?',
+      subtext: 'Helps Mizan Companion choose the right support intensity',
+      options: [
+        { label: 'Manageable — just checking in', score: 0 },
+        { label: 'A bit stressed, could use a reset', score: 1 },
+        { label: 'Heavy — affecting sleep or focus', score: 2 },
+        { label: 'Overwhelming — I want human support', score: 3 },
+      ],
+    });
+  }
+
+  return questions.slice(0, 3);
+}
+
 export async function dispatchSystemWellbeingNotification(
   report: AdlDriftReport,
   onNotificationTap?: () => void
@@ -189,37 +366,31 @@ export async function dispatchSystemWellbeingNotification(
   return true;
 }
 
-/**
- * Generates a realistic 10-day baseline + 3-day Mind-Body drift dataset
- * so users/reviewers can immediately experience the phone/watch notification report.
- */
 export function buildSampleDriftDataset(): DailyAdlSnapshot[] {
   const days: DailyAdlSnapshot[] = [];
   const now = Date.now();
 
-  // 7 baseline days (healthy personal rhythm)
   for (let i = 9; i >= 3; i--) {
     days.push({
       date: new Date(now - i * 86400000).toISOString().slice(0, 10),
-      steps: 7800 + (i % 3) * 450,
-      sleepHours: 7.4,
+      steps: 6100 + (i % 3) * 350,
+      sleepHours: 7.1,
       nightScreenPickups: 1,
-      sedentaryMinutes: 360,
-      restingHr: 64,
+      sedentaryMinutes: 350,
+      restingHr: 68,
       hrvMs: 56,
     });
   }
 
-  // Last 3 days (subtle physical + behavioral drift: shorter sleep, lower movement, lower HRV)
   for (let i = 2; i >= 0; i--) {
     days.push({
       date: new Date(now - i * 86400000).toISOString().slice(0, 10),
-      steps: 4100 - i * 200,
-      sleepHours: 5.1,
+      steps: 2600 - i * 150,
+      sleepHours: 4.6,
       nightScreenPickups: 6,
-      sedentaryMinutes: 520,
-      restingHr: 74,
-      hrvMs: 38,
+      sedentaryMinutes: 530,
+      restingHr: 76,
+      hrvMs: 37,
     });
   }
 
